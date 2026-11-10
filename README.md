@@ -119,7 +119,7 @@ Run at the end of `build.sh`; exit status 1 fails the build. It checks:
 
 1. **strings of every `.so`**: no `--enable-gpl`, `--enable-nonfree`,
    `--enable-version3`, `--enable-postproc`, `libpostproc`, `libx264`,
-   `x264 - core`, `libx265`, `dvdread`, `dvdnav`, `dvdcss`, no "GPL version
+   the x264 encoder banner, `libx265`, `dvdread`, `dvdnav`, `dvdcss`, no "GPL version
    2/3 or later" license string of FFmpeg, no exported GPL module license
    string. The two obsolete option names `dvdnav-caching` and `dvdread-caching`,
    carried by libvlccore itself, are allowed.
@@ -132,14 +132,40 @@ Run at the end of `build.sh`; exit status 1 fails the build. It checks:
 4. **contribs**: none of x264, x265, dvdread, dvdnav, dvdcss, postproc, a52,
    dca, faad, mad, mpeg2, samplerate, ... was built.
 5. **AAR content and libvlcjni sources**: no Lua assets, no GPL-only Java/C file.
-6. a list of the linked contrib libraries and versions.
+6. **provenance**: the log shows the contribs bootstrapped with an LGPL licensing,
+   their sources downloaded and compiled in the run (no prebuilt contrib archive),
+   and FFmpeg's own configure summary saying "License: LGPL version 2.1 or later".
+7. a list of the linked contrib libraries and versions.
+
+### Audit false positives found and fixed
+
+The first run of 2026-11-10 failed two checks, both false positives, with the
+build itself clean (FFmpeg 4.4.5 "License: LGPL version 2.1 or later", 255 modules
+without a GPL header, no GPL contrib):
+
+* `x264 - core`: the strings `x264 - core %d` and `x264 - core 0000` come from
+  FFmpeg's H.264 decoder (`libavcodec/h264_sei.c`, `sscanf(..., "x264 - core %d")`),
+  which recognises streams produced by x264. It is not x264 code. The check now
+  looks for the encoder banner (`x264.html`, `Copyleft 2003`, `x264 - core N rN`).
+* "You may redistribute it under the terms of the GNU General Public License":
+  `LICENSE_MSG` of `include/vlc_common.h`, the startup text of libvlccore, which is
+  LGPL. A module's license is exported as "Licensed under the terms of the GNU ..."
+  (`VLC_LICENSE_GPL_2_PLUS` in `vlc_plugin.h`); the check, and the filter that drops
+  GPL modules from the build, now match that string only. The one module that the
+  filter drops, `stream_out_cycle`, is genuinely GPL.
+
+The same run also showed that the pattern "GPL version 2 or 3 or later" never ran
+(its `|` clashed with the pattern separator); it is fixed.
 
 Limits: it reads license headers and strings, not legal intent. A file without a
 license header is not refused. A module whose objects cannot be mapped to a
 dependency file is only reported as a warning (its exported license string is
-still checked). The data file `assets/hrtfs/*.sofa` (HRTF filters copied from
-VLC's `share/hrtfs`) has no source header and is reported as a warning: check its
-license before shipping. The exact contents of the contribs come from VideoLAN's
+still checked). When an object name is ambiguous (`dummy.o`, `m3u.o`, ...) every
+candidate file is read, so the audit can only over-report, and such a finding is
+a warning. The data file `assets/hrtfs/dodeca_and_7channel_3DSL_HRTF.sofa` (HRTF
+filters of the spatial audio filter) declares its own license inside the file
+(HDF5 attributes: "Copyright (C) 2017 3D Sound Labs", GNU Lesser General Public
+License 2.1 or later); the audit reads it and fails if it is not LGPL. The exact contents of the contribs come from VideoLAN's
 `contrib/` recipes at the pinned commit: the audit trusts `--disable-gpl` for what
 those recipes build but verifies the result (checks 1, 3, 4).
 

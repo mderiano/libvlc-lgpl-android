@@ -25,7 +25,7 @@ index f9c4a17..95b0e1f 100755
 +    # GPL-free build: a module that declares a GPL license (VLC_MODULE_LICENSE,
 +    # exported as vlc_entry_license__* and stored as a string) is never linked.
 +    for avlc_module in $(find $1 -name 'lib*plugin.a' | grep -vE "lib(${blacklist_regexp})_plugin.a"); do
-+        if strings -a "$avlc_module" | grep -qE 'terms of the GNU (Affero )?General Public License'; then
++        if strings -a "$avlc_module" | grep -qE 'Licensed under the terms of the GNU (Affero )?General Public License'; then
 +            echo "GPL-free build: dropping GPL module $(basename "$avlc_module")" >&2
 +            continue
 +        fi

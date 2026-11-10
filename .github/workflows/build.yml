@@ -17,6 +17,14 @@ on:
         type: choice
         options: [l, a]
         default: l
+      release:
+        description: Publish a GitHub release when the audit passes
+        type: boolean
+        default: true
+      release_tag:
+        description: "Existing release tag to add this ABI to (empty: create the next v3.7.0-lgpl.N)"
+        type: string
+        default: ""
 
 run-name: libvlc LGPL ${{ inputs.abi }} / license ${{ inputs.license }}
 
@@ -28,6 +36,8 @@ jobs:
     name: libvlc ${{ inputs.abi }} (license ${{ inputs.license }})
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    permissions:
+      contents: write   # only used by the release step, after a passing audit
     env:
       ABI: ${{ inputs.abi }}
       LICENSE_FLAG: ${{ inputs.license }}
@@ -142,3 +152,50 @@ jobs:
           path: ${{ runner.temp }}/out/source
           if-no-files-found: ignore
           retention-days: 90
+
+      - name: Publish the release (audit passed)
+        if: success() && inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          VERSION=3.7.0
+          OUT="$RUNNER_TEMP/out"; STAGE="$RUNNER_TEMP/release"; sfx="${ABI}-${LICENSE_FLAG}"
+          grep -q '^PASS' "$OUT/LICENSE-AUDIT.txt"   # never release without a passing audit
+          mkdir -p "$STAGE"
+          cp "$OUT"/*.aar "$STAGE/"
+          cp "$OUT/BUILD-INFO.txt" "$STAGE/BUILD-INFO-$sfx.txt"
+          cp "$OUT/SHA256SUMS.txt" "$STAGE/SHA256SUMS-$sfx.txt"
+          cp "$OUT/LICENSE-AUDIT.txt" "$STAGE/LICENSE-AUDIT-$sfx.txt"
+          cp "$OUT"/source/vlc-*-patched.tar.xz "$OUT"/source/libvlcjni-*-patched.tar.xz "$STAGE/"
+          cp "$OUT/source/contrib-tarballs.tar" "$STAGE/contrib-tarballs-$sfx.tar"
+          cp "$OUT/source/CONTRIB-SOURCES.sha256" "$STAGE/CONTRIB-SOURCES-$sfx.sha256"
+          if [ -n "$TAG_INPUT" ]; then
+            tag="$TAG_INPUT"
+          else
+            last=$(gh release list --limit 200 --json tagName --jq '.[].tagName' \
+              | sed -n "s/^v${VERSION}-lgpl\.\([0-9][0-9]*\)$/\1/p" | sort -n | tail -n 1)
+            tag="v${VERSION}-lgpl.$(( ${last:-0} + 1 ))"
+          fi
+          aar=$(ls "$STAGE"/*.aar | head -n 1); aar_name=$(basename "$aar"); aar_sha=$(sha256sum "$aar" | cut -d' ' -f1)
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          LibVLC ${VERSION} for Android without GPL components (libvlcjni ${LIBVLCJNI_SHORT:-7cd0c151}, VLC 3458be16).
+
+          | ABI | license flag | file | sha256 |
+          |---|---|---|---|
+          | ${ABI} | ${LICENSE_FLAG} | \`${aar_name}\` | \`${aar_sha}\` |
+
+          Stable URL: https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/${aar_name}
+
+          The build passed check-no-gpl.sh (LICENSE-AUDIT-${sfx}.txt). BUILD-INFO-${sfx}.txt lists the pinned commits and options.
+          Corresponding source: the vlc and libvlcjni tarballs and contrib-tarballs-${sfx}.tar below. Build run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$STAGE"/* --clobber
+          else
+            gh release create "$tag" "$STAGE"/* --target "$GITHUB_SHA" \
+              --title "libvlc ${VERSION} LGPL (${tag})" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+          echo "release: $tag" | tee -a "$GITHUB_STEP_SUMMARY"

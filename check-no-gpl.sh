@@ -66,20 +66,25 @@ SOS=$(find "$TMP/aar/jni" -name '*.so' | sort)
 section "A. strings of the shared libraries"
 # pattern|label ; matches are case-insensitive, one extended regex each
 A_PATTERNS=(
-  '--enable-gpl|FFmpeg built with --enable-gpl'
-  '--enable-nonfree|FFmpeg built with --enable-nonfree'
-  '--enable-version3|FFmpeg built with --enable-version3'
-  '--enable-postproc|FFmpeg built with --enable-postproc'
-  'libpostproc|libpostproc (GPL)'
-  'libx264|libx264 (GPL)'
-  'x264 - core|x264 encoder banner (GPL)'
-  'x264 advanced options|x264 options (GPL)'
-  'libx265|libx265 (GPL)'
-  'dvdread|libdvdread / dvdread module (GPL)'
-  'dvdnav|libdvdnav / dvdnav module (GPL)'
-  'dvdcss|libdvdcss (GPL)'
-  'terms of the GNU (Affero )?General Public License|module exporting a GPL license (VLC_MODULE_LICENSE)'
-  '(^|[^L])GPL version [23]|FFmpeg license string "GPL version ..."'
+  '--enable-gpl@@FFmpeg built with --enable-gpl'
+  '--enable-nonfree@@FFmpeg built with --enable-nonfree'
+  '--enable-version3@@FFmpeg built with --enable-version3'
+  '--enable-postproc@@FFmpeg built with --enable-postproc'
+  'libpostproc@@libpostproc (GPL)'
+  'libx264@@libx264 (GPL)'
+  # The x264 *encoder* banner. "x264 - core %d" alone is FFmpeg's H.264 decoder
+  # recognising streams made by x264 (libavcodec/h264_sei.c): not x264 code.
+  'x264\.html|Copyleft 2003|x264 - core [0-9]+ r[0-9]+@@x264 encoder banner (GPL)'
+  'x264 advanced options@@x264 options (GPL)'
+  'libx265@@libx265 (GPL)'
+  'dvdread@@libdvdread / dvdread module (GPL)'
+  'dvdnav@@libdvdnav / dvdnav module (GPL)'
+  'dvdcss@@libdvdcss (GPL)'
+  # The string a module exports through VLC_MODULE_LICENSE. (The LICENSE_MSG of
+  # vlc_common.h, "You may redistribute it under the terms of the GNU General
+  # Public License", is libvlccore's startup text, not a module license.)
+  'Licensed under the terms of the GNU (Affero )?General Public License@@module exporting a GPL license (VLC_MODULE_LICENSE)'
+  '(^|[^L])GPL version [23]@@FFmpeg license string "GPL version ..."'
 )
 # Obsolete option names that libvlccore itself carries (src/libvlc-module.c): not code.
 A_ALLOW='^(dvdnav|dvdread)-caching$'
@@ -88,7 +93,7 @@ for so in $SOS; do
   strings -a "$so" > "$TMP/strings.txt"
   say "$rel ($(wc -c < "$so") bytes, $(wc -l < "$TMP/strings.txt") strings)"
   for entry in "${A_PATTERNS[@]}"; do
-    pat="${entry%%|*}"; label="${entry#*|}"
+    pat="${entry%%@@*}"; label="${entry#*@@}"
     hits=$(grep -aiE -- "$pat" "$TMP/strings.txt" | grep -avE -- "$A_ALLOW" | sort -u | head -n 5)
     if [ -n "$hits" ]; then
       fail "$rel: $label"
@@ -168,8 +173,15 @@ else
   fail "libvlcjni sources contain GPL-only file(s)"
 fi
 cat "$TMP/tree.txt" >> "$REPORT"
-hr=$(unzip -Z1 "$AAR" | grep -c '^assets/hrtfs/' || true)
-[ "$hr" -gt 0 ] && warn "assets/hrtfs ($hr file) is data copied from VLC's share/hrtfs; its license is not a source header, check it (see README)"
+for sofa in "$TMP"/aar/assets/hrtfs/*; do
+  [ -f "$sofa" ] || continue
+  # The SOFA files carry their own license in their attributes (HDF5 strings).
+  if strings -a "$sofa" | grep -q 'GNU Lesser General Public License' && ! strings -a "$sofa" | grep -qE 'GNU General Public License'; then
+    ok "$(basename "$sofa"): declares the LGPL ($(strings -a "$sofa" | grep -m1 'Copyright'))"
+  else
+    fail "$(basename "$sofa"): no clear LGPL declaration inside the file"
+  fi
+done
 
 # ------------------------------------------------------------------ F ----
 section "F. contrib libraries linked (pkg-config name and version)"
@@ -182,6 +194,22 @@ else
   warn "no pkgconfig directory in $CONTRIB"
 fi
 say "static libraries: $(ls "$CONTRIB"/lib/*.a 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"
+
+section "G. contribs were compiled here with --disable-gpl (no prebuilt archive)"
+LOG="$OUT/build.log"
+if [ -f "$LOG" ]; then
+  if grep -qE 'Packages licensing\.\.\. +Lesser GPL version' "$LOG"; then
+    ok "contrib bootstrap: $(grep -m1 -E 'Packages licensing' "$LOG" | tr -s ' ')"
+  else
+    fail "contrib bootstrap did not report an LGPL licensing"
+  fi
+  n=$(grep -cE '^curl -f -L .*/pub/contrib/' "$LOG" || true)
+  if [ "${n:-0}" -gt 0 ]; then ok "$n contrib source tarballs fetched and built from source"; else warn "no contrib source download in the log (tarball cache?)"; fi
+  if grep -qE 'Fetching prebuilt|vlc-contrib-[a-z0-9_.-]+\.tar|artifacts\.videolan\.org' "$LOG"; then fail "prebuilt contribs were used"; else ok "no prebuilt contrib archive used"; fi
+  if grep -qE '^License: LGPL version 2.1 or later' "$LOG"; then ok "FFmpeg configure summary: License: LGPL version 2.1 or later"; else fail "FFmpeg configure summary does not say LGPL 2.1"; fi
+else
+  warn "build log not found at $LOG"
+fi
 
 section "RESULT"
 if [ "$FAILS" -eq 0 ]; then
