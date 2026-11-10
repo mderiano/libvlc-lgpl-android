@@ -174,15 +174,13 @@ else
 fi
 cat "$TMP/tree.txt" >> "$REPORT"
 # The SOFA files carry their own license in their attributes (HDF5 strings, stored
-# uncompressed). Read into a variable: "strings | grep -q" under pipefail fails on SIGPIPE.
+# as plain text): read with Python, not strings|grep (pipefail/SIGPIPE, tool differences).
 check_sofa() {
-  local sofa="$1" txt
-  txt=$(strings -a "$sofa")
-  if printf '%s\n' "$txt" | grep -q 'GNU Lesser General Public License' \
-     && ! printf '%s\n' "$txt" | grep -q 'GNU General Public License'; then
-    ok "$(basename "$sofa"): declares the LGPL ($(printf '%s\n' "$txt" | grep -m1 'Copyright'))"
+  local sofa="$1" msg
+  if msg=$(python3 -I "$HERE/scripts/audit_licenses.py" datalicense "$sofa"); then
+    ok "$(basename "$sofa"): $msg"
   else
-    fail "$(basename "$sofa"): no clear LGPL declaration inside the file"
+    fail "$(basename "$sofa"): $msg"
   fi
 }
 for sofa in "$TMP"/aar/assets/hrtfs/*; do

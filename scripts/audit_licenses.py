@@ -174,7 +174,24 @@ def audit_tree(dirs):
     return 1 if bad else 0
 
 
+def audit_data_license(path):
+    """License declared inside a data file (SOFA/HDF5 attribute, stored as plain text)."""
+    data = open(path, "rb").read()
+    text = re.sub(rb"\s+", b" ", data)
+    lesser = re.search(rb"GNU Lesser General Public License", text)
+    plain = re.search(rb"GNU General Public License", text)
+    m = re.search(rb"Copyright \(C\) [0-9]{4}[ -~]{0,60}?(?= This file| VLC|$)", text)
+    who = m.group(0).decode("ascii", "replace") if m else "no copyright line"
+    if lesser and not plain:
+        print("declares the GNU Lesser General Public License (%s)" % who)
+        return 0
+    print("no clear LGPL declaration inside the file (lesser=%s, plain GPL=%s)" % (bool(lesser), bool(plain)))
+    return 1
+
+
 def main(argv):
+    if len(argv) == 3 and argv[1] == "datalicense":
+        return audit_data_license(argv[2])
     if len(argv) >= 2 and argv[1] == "modules":
         opts = dict(zip(argv[2::2], argv[3::2]))
         if "--vlc" not in opts or "--build" not in opts:
