@@ -1,0 +1,144 @@
+name: Build libvlc (LGPL)
+
+# Builds LibVLC for Android without any GPL component, in VideoLAN's own public
+# build image, then audits the result (check-no-gpl.sh). The build takes 1 to 2
+# hours. See README.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      abi:
+        description: Android ABI
+        type: choice
+        options: [arm64-v8a, armeabi-v7a, x86_64]
+        default: arm64-v8a
+      license:
+        description: "libvlcjni --license: l = LGPL 3 (GnuTLS, https works), a = LGPL 2.1 (no TLS)"
+        type: choice
+        options: [l, a]
+        default: l
+
+run-name: libvlc LGPL ${{ inputs.abi }} / license ${{ inputs.license }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: libvlc ${{ inputs.abi }} (license ${{ inputs.license }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      ABI: ${{ inputs.abi }}
+      LICENSE_FLAG: ${{ inputs.license }}
+    steps:
+      - name: Checkout the recipe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/share/swift /usr/local/.ghcup /usr/local/share/powershell \
+            /usr/local/julia* /opt/microsoft /usr/lib/google-cloud-sdk
+          sudo docker image prune --all --force >/dev/null || true
+          df -h /
+
+      - name: Pick the build image and the pins
+        id: pins
+        run: |
+          # The two images libvlcjni's own .gitlab-ci.yml uses at the pinned commit:
+          # 64-bit ABIs need NDK 27/28 (vlc-debian-android: NDK 28b, Gradle 8.13),
+          # armeabi-v7a needs NDK 21 (vlc-debian-android-3.0: NDK 21e, Gradle 8.13).
+          # Both are public on registry.videolan.org (no authentication).
+          if [ "$ABI" = armeabi-v7a ]; then
+            echo "image=registry.videolan.org/vlc-debian-android-3.0:20250626142950" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=registry.videolan.org/vlc-debian-android:20250626142950" >> "$GITHUB_OUTPUT"
+          fi
+          echo "vlc=$(sed -n 's/^VLC_COMMIT=//p' build.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the contrib source tarballs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tarballs
+          key: vlc-contrib-tarballs-${{ steps.pins.outputs.vlc }}-${{ inputs.abi }}
+          restore-keys: |
+            vlc-contrib-tarballs-${{ steps.pins.outputs.vlc }}-
+
+      - name: Pull the build image
+        run: docker pull "${{ steps.pins.outputs.image }}"
+
+      - name: Build and audit
+        run: |
+          mkdir -p "$RUNNER_TEMP/work" "$RUNNER_TEMP/out" "$RUNNER_TEMP/tarballs"
+          chmod 777 "$RUNNER_TEMP/work" "$RUNNER_TEMP/out" "$RUNNER_TEMP/tarballs"
+          chmod -R a+rwX "$RUNNER_TEMP/tarballs" || true
+          # The image's own user (uid 499, "videolan") runs the build, as in VideoLAN's CI.
+          docker run --rm \
+            -e GITHUB_RUN_ID -e GITHUB_REPOSITORY -e GITHUB_SERVER_URL -e GITHUB_SHA \
+            -e VLC_TARBALLS=/tarballs \
+            -v "$GITHUB_WORKSPACE:/recipe:ro" \
+            -v "$RUNNER_TEMP/work:/work" \
+            -v "$RUNNER_TEMP/out:/out" \
+            -v "$RUNNER_TEMP/tarballs:/tarballs" \
+            -w /work \
+            "${{ steps.pins.outputs.image }}" \
+            bash /recipe/build.sh --abi "$ABI" --license "$LICENSE_FLAG" --work /work --out /out
+
+      - name: Compress the build log
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/out/build.log" ]; then gzip -9 -k -f "$RUNNER_TEMP/out/build.log"; fi
+          df -h /
+          ls -la "$RUNNER_TEMP/out" || true
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### libvlc LGPL ${ABI} (license ${LICENSE_FLAG})"
+            if [ -f "$RUNNER_TEMP/out/LICENSE-AUDIT.txt" ]; then
+              echo '```'
+              grep -E '^(  FAIL|  warn|PASS|FAIL|LICENSE AUDIT)' "$RUNNER_TEMP/out/LICENSE-AUDIT.txt" | head -n 60
+              echo '```'
+            else
+              echo "No LICENSE-AUDIT.txt: the build stopped before the audit (see the build log artifact)."
+            fi
+            [ -f "$RUNNER_TEMP/out/SHA256SUMS.txt" ] && { echo '```'; cat "$RUNNER_TEMP/out/SHA256SUMS.txt"; echo '```'; }
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the AAR and the reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: libvlc-lgpl-${{ inputs.abi }}-${{ inputs.license }}
+          path: |
+            ${{ runner.temp }}/out/*.aar
+            ${{ runner.temp }}/out/BUILD-INFO.txt
+            ${{ runner.temp }}/out/SHA256SUMS.txt
+            ${{ runner.temp }}/out/LICENSE-AUDIT.txt
+            ${{ runner.temp }}/out/contrib-config.mak
+            ${{ runner.temp }}/out/vlc-configure-invocation.txt
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload the build log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-log-${{ inputs.abi }}-${{ inputs.license }}
+          path: ${{ runner.temp }}/out/build.log.gz
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Upload the corresponding source
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: corresponding-source-${{ inputs.abi }}-${{ inputs.license }}
+          path: ${{ runner.temp }}/out/source
+          if-no-files-found: ignore
+          retention-days: 90

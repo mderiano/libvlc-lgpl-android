@@ -1,0 +1,450 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: build <build@localhost>
+Date: Tue, 10 Nov 2026 21:03:43 +0100
+Subject: [PATCH 2/2] RendererDiscoverer: remove the class and its native part
+ (GPL)
+
+RendererDiscoverer.java is published under the GNU General Public License.
+Remove it and its JNI part, keep RendererItem which MediaPlayer uses.
+---
+ libvlc/jni/libvlcjni-rendererdiscoverer.c     | 202 +-----------------
+ libvlc/jni/libvlcjni.c                        |  20 --
+ .../videolan/libvlc/RendererDiscoverer.java   | 166 --------------
+ 3 files changed, 4 insertions(+), 384 deletions(-)
+ delete mode 100644 libvlc/src/org/videolan/libvlc/RendererDiscoverer.java
+
+diff --git a/libvlc/jni/libvlcjni-rendererdiscoverer.c b/libvlc/jni/libvlcjni-rendererdiscoverer.c
+index 4133e2b..e5715d2 100644
+--- a/libvlc/jni/libvlcjni-rendererdiscoverer.c
++++ b/libvlc/jni/libvlcjni-rendererdiscoverer.c
+@@ -1,5 +1,5 @@
+ /*****************************************************************************
+- * libvlcjni-rendererdiscoverer.c
++ * libvlcjni-rendererdiscoverer.c (RendererItem only)
+  *****************************************************************************
+  * Copyright © 2017 VLC authors, VideoLAN and VideoLabs
+  *
+@@ -20,203 +20,9 @@
+ 
+ #include "libvlcjni-vlcobject.h"
+ 
+-static const libvlc_event_type_t rd_events[] = {
+-    libvlc_RendererDiscovererItemAdded,
+-    libvlc_RendererDiscovererItemDeleted,
+-    -1,
+-};
+-
+-static bool
+-RendererDiscoverer_event_cb(vlcjni_object *p_obj, const libvlc_event_t *p_ev,
+-                     java_event *p_java_event)
+-{
+-    switch (p_ev->type)
+-    {
+-    case libvlc_RendererDiscovererItemAdded:
+-        p_java_event->arg1 = (uintptr_t) (void *) p_ev->u.renderer_discoverer_item_added.item;
+-        break;
+-    case libvlc_RendererDiscovererItemDeleted:
+-        p_java_event->arg1 = (uintptr_t) (void *) p_ev->u.renderer_discoverer_item_deleted.item;
+-        break;
+-    }
+-    p_java_event->type = p_ev->type;
+-    return true;
+-}
+-
+-void
+-Java_org_videolan_libvlc_RendererDiscoverer_nativeNew(JNIEnv *env,
+-                                                      jobject thiz,
+-                                                      jobject libVlc,
+-                                                      jstring jname)
+-{
+-    vlcjni_object *p_obj;
+-    const char* p_name;
+-
+-    if (!jname || !(p_name = (*env)->GetStringUTFChars(env, jname, 0)))
+-    {
+-        throw_Exception(env, VLCJNI_EX_ILLEGAL_ARGUMENT, "jname invalid");
+-        return;
+-    }
+-
+-    p_obj = VLCJniObject_newFromJavaLibVlc(env, thiz, libVlc);
+-    if (!p_obj)
+-    {
+-        (*env)->ReleaseStringUTFChars(env, jname, p_name);
+-        return;
+-    }
+-
+-    p_obj->u.p_rd = libvlc_renderer_discoverer_new(p_obj->p_libvlc, p_name);
+-
+-    (*env)->ReleaseStringUTFChars(env, jname, p_name);
+-
+-    if (!p_obj->u.p_rd)
+-    {
+-        VLCJniObject_release(env, thiz, p_obj);
+-        throw_Exception(env, VLCJNI_EX_OUT_OF_MEMORY, "RendererDiscoverer");
+-        return;
+-    }
+-    VLCJniObject_attachEvents(p_obj, RendererDiscoverer_event_cb,
+-                              libvlc_renderer_discoverer_event_manager(p_obj->u.p_rd),
+-                              rd_events);
+-}
+-
+-void
+-Java_org_videolan_libvlc_RendererDiscoverer_nativeRelease(JNIEnv *env,
+-                                                       jobject thiz)
+-{
+-    vlcjni_object *p_obj = VLCJniObject_getInstance(env, thiz);
+-
+-    if (!p_obj)
+-        return;
+-
+-    libvlc_renderer_discoverer_release(p_obj->u.p_rd);
+-
+-    VLCJniObject_release(env, thiz, p_obj);
+-}
+-
+-jboolean
+-Java_org_videolan_libvlc_RendererDiscoverer_nativeStart(JNIEnv *env, jobject thiz)
+-{
+-    vlcjni_object *p_obj = VLCJniObject_getInstance(env, thiz);
+-
+-    if (!p_obj)
+-        return false;
+-
+-    return libvlc_renderer_discoverer_start(p_obj->u.p_rd) == 0;
+-}
+-
+-void
+-Java_org_videolan_libvlc_RendererDiscoverer_nativeStop(JNIEnv *env, jobject thiz)
+-{
+-    vlcjni_object *p_obj = VLCJniObject_getInstance(env, thiz);
+-
+-    if (!p_obj)
+-        return;
+-
+-    libvlc_renderer_discoverer_stop(p_obj->u.p_rd);
+-}
+-
+-
+-static jobject
+-service_to_object(JNIEnv *env, libvlc_rd_description_t *p_service)
+-{
+-    jstring jname = NULL;
+-    jstring jlongName = NULL;
+-
+-    jname = vlcNewStringUTF(env, p_service->psz_name);
+-    jlongName = vlcNewStringUTF(env, p_service->psz_longname);
+-
+-    jobject jobj = (*env)->CallStaticObjectMethod(env, fields.RendererDiscoverer.clazz,
+-                        fields.RendererDiscoverer.createDescriptionFromNativeID,
+-                        jname, jlongName);
+-
+-    (*env)->DeleteLocalRef(env, jname);
+-    (*env)->DeleteLocalRef(env, jlongName);
+-    return jobj;
+-}
+-
+-
+-static jobject
+-item_to_object(JNIEnv *env, libvlc_renderer_item_t *p_item)
+-{
+-    jstring jname = NULL;
+-    jstring jType = NULL;
+-    jstring jIconUri = NULL;
+-    jint jFlags = 0;
+-
+-    jname = vlcNewStringUTF(env, libvlc_renderer_item_name(p_item));
+-    jType = vlcNewStringUTF(env, libvlc_renderer_item_type(p_item));
+-    jIconUri = vlcNewStringUTF(env, libvlc_renderer_item_icon_uri(p_item));
+-    jFlags = libvlc_renderer_item_flags(p_item);
+-
+-    jobject jobj = (*env)->CallStaticObjectMethod(env, fields.RendererDiscoverer.clazz,
+-                        fields.RendererDiscoverer.createItemFromNativeID,
+-                        jname, jType, jIconUri, jFlags, (jlong) p_item);
+-
+-    (*env)->DeleteLocalRef(env, jname);
+-    (*env)->DeleteLocalRef(env, jType);
+-    (*env)->DeleteLocalRef(env, jIconUri);
+-    return jobj;
+-}
+-
+-jobject
+-Java_org_videolan_libvlc_RendererDiscoverer_nativeList(JNIEnv *env, jobject thiz,
+-                                                    jobject libVlc)
+-{
+-    vlcjni_object *p_lib_obj = VLCJniObject_getInstance(env, libVlc);
+-    libvlc_instance_t *p_libvlc = p_lib_obj->u.p_libvlc;
+-    libvlc_rd_description_t **pp_services = NULL;
+-    size_t i_nb_services = 0;
+-    jobjectArray array;
+-
+-    if (!p_lib_obj)
+-        return NULL;
+-
+-    i_nb_services =
+-        libvlc_renderer_discoverer_list_get( p_libvlc, &pp_services);
+-    if (i_nb_services == 0)
+-        return NULL;
+-
+-    array = (*env)->NewObjectArray(env, i_nb_services,
+-                                   fields.RendererDiscoverer.Description.clazz,
+-                                   NULL);
+-    if (!array)
+-        goto error;
+-
+-    for (size_t i = 0; i < i_nb_services; ++i)
+-    {
+-        jobject jservice = service_to_object(env, pp_services[i]);
+-
+-        (*env)->SetObjectArrayElement(env, array, i, jservice);
+-    }
+-
+-error:
+-    if (pp_services)
+-        libvlc_renderer_discoverer_list_release(pp_services, i_nb_services);
+-    return array;
+-}
+-
+-jobject
+-Java_org_videolan_libvlc_RendererDiscoverer_nativeNewItem(JNIEnv *env, jobject thiz,
+-                                                    jlong ref)
+-{
+-    vlcjni_object *p_rd_obj = VLCJniObject_getInstance(env, thiz);
+-    vlcjni_object *p_obj;
+-    libvlc_renderer_item_t *item_ref = (libvlc_renderer_item_t *)(intptr_t)ref;
+-
+-    if (!p_rd_obj)
+-        return NULL;
+-
+-    jobject jitem = item_to_object(env, item_ref);
+-
+-    p_obj = VLCJniObject_newFromLibVlc(env, jitem, p_rd_obj->p_libvlc);
+-    if (!p_obj)
+-        return NULL;
+-
+-    p_obj->u.p_r = libvlc_renderer_item_hold(item_ref);
+-
+-    return jitem;
+-}
++/* The RendererDiscoverer class (RendererDiscoverer.java) is published under the
++ * GNU General Public License: it is not part of this build, and neither is its
++ * native part. Only the RendererItem release is kept, which MediaPlayer uses. */
+ 
+ void
+ Java_org_videolan_libvlc_RendererItem_nativeReleaseItem(JNIEnv *env, jobject thiz)
+diff --git a/libvlc/jni/libvlcjni.c b/libvlc/jni/libvlcjni.c
+index f7c74d3..c3654aa 100644
+--- a/libvlc/jni/libvlcjni.c
++++ b/libvlc/jni/libvlcjni.c
+@@ -189,10 +189,6 @@ jint JNI_OnLoad(JavaVM *vm, void *reserved)
+               "org/videolan/libvlc/MediaDiscoverer", true);
+     GET_CLASS(fields.MediaDiscoverer.Description.clazz,
+               "org/videolan/libvlc/MediaDiscoverer$Description", true);
+-    GET_CLASS(fields.RendererDiscoverer.clazz,
+-              "org/videolan/libvlc/RendererDiscoverer", true);
+-    GET_CLASS(fields.RendererDiscoverer.Description.clazz,
+-              "org/videolan/libvlc/RendererDiscoverer$Description", true);
+     GET_CLASS(fields.Dialog.clazz,
+               "org/videolan/libvlc/Dialog", true);
+ 
+@@ -278,20 +274,6 @@ jint JNI_OnLoad(JavaVM *vm, void *reserved)
+            "(Ljava/lang/String;Ljava/lang/String;I)"
+            "Lorg/videolan/libvlc/MediaDiscoverer$Description;");
+ 
+-    GET_ID(GetStaticMethodID,
+-           fields.RendererDiscoverer.createDescriptionFromNativeID,
+-           fields.RendererDiscoverer.clazz,
+-           "createDescriptionFromNative",
+-           "(Ljava/lang/String;Ljava/lang/String;)"
+-           "Lorg/videolan/libvlc/RendererDiscoverer$Description;");
+-
+-    GET_ID(GetStaticMethodID,
+-           fields.RendererDiscoverer.createItemFromNativeID,
+-           fields.RendererDiscoverer.clazz,
+-           "createItemFromNative",
+-           "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IJ)"
+-           "Lorg/videolan/libvlc/RendererItem;");
+-
+     GET_ID(GetStaticMethodID,
+            fields.Dialog.displayErrorFromNativeID,
+            fields.Dialog.clazz,
+@@ -363,8 +345,6 @@ void JNI_OnUnload(JavaVM* vm, void* reserved)
+     (*env)->DeleteGlobalRef(env, fields.MediaPlayer.Equalizer.clazz);
+     (*env)->DeleteGlobalRef(env, fields.MediaDiscoverer.clazz);
+     (*env)->DeleteGlobalRef(env, fields.MediaDiscoverer.Description.clazz);
+-    (*env)->DeleteGlobalRef(env, fields.RendererDiscoverer.clazz);
+-    (*env)->DeleteGlobalRef(env, fields.RendererDiscoverer.Description.clazz);
+     (*env)->DeleteGlobalRef(env, fields.Dialog.clazz);
+ 
+     pthread_key_delete(jni_env_key);
+diff --git a/libvlc/src/org/videolan/libvlc/RendererDiscoverer.java b/libvlc/src/org/videolan/libvlc/RendererDiscoverer.java
+deleted file mode 100644
+index f92de96..0000000
+--- a/libvlc/src/org/videolan/libvlc/RendererDiscoverer.java
++++ /dev/null
+@@ -1,166 +0,0 @@
+-/*****************************************************************************
+- * RendererDiscoverer.java
+- *****************************************************************************
+- * Copyright © 2017 VLC authors and VideoLAN
+- *
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- * You should have received a copy of the GNU General Public License
+- * along with this program; if not, write to the Free Software
+- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
+- *****************************************************************************/
+-
+-package org.videolan.libvlc;
+-
+-import java.util.ArrayList;
+-import java.util.List;
+-
+-import androidx.annotation.Nullable;
+-import androidx.collection.LongSparseArray;
+-
+-import org.videolan.libvlc.interfaces.AbstractVLCEvent;
+-import org.videolan.libvlc.interfaces.ILibVLC;
+-
+-public class RendererDiscoverer extends VLCObject<RendererDiscoverer.Event> {
+-    private final static String TAG = "LibVLC/RendererDiscoverer";
+-
+-    final List<RendererItem> mRenderers = new ArrayList<>();
+-
+-    public static class Event extends AbstractVLCEvent {
+-
+-        public static final int ItemAdded   = 0x502;
+-        public static final int ItemDeleted = 0x503;
+-
+-        private final RendererItem item;
+-
+-        protected Event(int type, long nativeHolder, RendererItem item) {
+-            super(type, nativeHolder);
+-            this.item = item;
+-            item.retain();
+-        }
+-
+-        public RendererItem getItem() {
+-            return item;
+-        }
+-
+-        @Override
+-        public void release() {
+-            item.release();
+-            super.release();
+-        }
+-    }
+-
+-    @SuppressWarnings("unused") /* Used from JNI */
+-    private static RendererItem createItemFromNative(String name, String type, String iconUrl, int flags, long ref) {
+-        return new RendererItem(name, type, iconUrl, flags, ref);
+-    }
+-
+-    public interface EventListener extends AbstractVLCEvent.Listener<RendererDiscoverer.Event> {}
+-
+-    /**
+-     * Create a MediaDiscover.
+-     *
+-     * @param ILibVLC a valid LibVLC
+-     * @param name Name of the vlc service discovery.
+-     */
+-    public RendererDiscoverer(ILibVLC ILibVLC, String name) {
+-        super(ILibVLC);
+-        nativeNew(ILibVLC, name);
+-    }
+-
+-    /**
+-     * Starts the discovery. This RendererDiscoverer should be alive (not released).
+-     *
+-     * @return true the service is started
+-     */
+-    public boolean start() {
+-        if (isReleased()) throw new IllegalStateException("MediaDiscoverer is released");
+-        return nativeStart();
+-    }
+-
+-    /**
+-     * Stops the discovery. This RendererDiscoverer should be alive (not released).
+-     * (You can also call {@link #release() to stop the discovery directly}.
+-     */
+-    public void stop() {
+-        if (isReleased()) throw new IllegalStateException("MediaDiscoverer is released");
+-        setEventListener(null);
+-        nativeStop();
+-        release();
+-    }
+-
+-    public void setEventListener(EventListener listener) {
+-        super.setEventListener(listener);
+-    }
+-
+-    public static Description[] list(ILibVLC ILibVlc) {
+-        return nativeList(ILibVlc);
+-    }
+-
+-    public static class Description {
+-        public final String name;
+-        final String longName;
+-        private Description(String name, String longName) {
+-            this.name = name;
+-            this.longName = longName;
+-        }
+-    }
+-
+-    @Override
+-    protected Event onEventNative(int eventType, long arg1, long arg2, float argf1, @Nullable String args1) {
+-        switch (eventType) {
+-            case Event.ItemAdded:
+-                return new Event(eventType, arg1, insertItemFromEvent(arg1));
+-            case Event.ItemDeleted:
+-                return new Event(eventType, arg1, removeItemFromEvent(arg1));
+-            default:
+-                return null;
+-        }
+-    }
+-
+-    private final LongSparseArray<RendererItem> index = new LongSparseArray<>();
+-    private synchronized RendererItem insertItemFromEvent(long arg1) {
+-        final RendererItem item = nativeNewItem(arg1);
+-        index.put(arg1, item);
+-        mRenderers.add(item);
+-        return item;
+-    }
+-
+-    private synchronized RendererItem removeItemFromEvent(long arg1) {
+-        final RendererItem item = index.get(arg1);
+-        if (item != null) {
+-            index.remove(arg1);
+-            mRenderers.remove(item);
+-            item.release();
+-        }
+-        return item;
+-    }
+-
+-    @Override
+-    protected void onReleaseNative() {
+-        for (RendererItem item : mRenderers) item.release();
+-        mRenderers.clear();
+-        nativeRelease();
+-    }
+-
+-    @SuppressWarnings("unused") /* Used from JNI */
+-    private static Description createDescriptionFromNative(String name, String longName) {
+-        return new Description(name, longName);
+-    }
+-
+-    /* JNI */
+-    private native void nativeNew(ILibVLC ILibVLC, String name);
+-    private native void nativeRelease();
+-    private native boolean nativeStart();
+-    private native void nativeStop();
+-    private static native Description[] nativeList(ILibVLC ILibVLC);
+-    private native RendererItem nativeNewItem(long ref);
+-}

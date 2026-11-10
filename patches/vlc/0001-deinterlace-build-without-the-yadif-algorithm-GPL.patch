@@ -1,0 +1,661 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: build <build@localhost>
+Date: Tue, 10 Nov 2026 21:01:40 +0100
+Subject: [PATCH] deinterlace: build without the yadif algorithm (GPL)
+
+yadif.h and yadif_template.h come from FFmpeg's yadif filter and are
+published under the GNU General Public License. Remove them and make the
+yadif and yadif2x modes use the linear interpolation, so that the
+deinterlace module is LGPL-only.
+---
+ modules/video_filter/Makefile.am              |   1 -
+ modules/video_filter/deinterlace/algo_yadif.c | 159 +---------
+ modules/video_filter/deinterlace/yadif.h      | 153 ----------
+ .../video_filter/deinterlace/yadif_template.h | 282 ------------------
+ 4 files changed, 8 insertions(+), 587 deletions(-)
+ delete mode 100644 modules/video_filter/deinterlace/yadif.h
+ delete mode 100644 modules/video_filter/deinterlace/yadif_template.h
+
+diff --git a/modules/video_filter/Makefile.am b/modules/video_filter/Makefile.am
+index f65344d..cf3e7be 100644
+--- a/modules/video_filter/Makefile.am
++++ b/modules/video_filter/Makefile.am
+@@ -132,7 +132,6 @@ libdeinterlace_plugin_la_SOURCES = \
+ 	video_filter/deinterlace/algo_basic.c video_filter/deinterlace/algo_basic.h \
+ 	video_filter/deinterlace/algo_x.c video_filter/deinterlace/algo_x.h \
+ 	video_filter/deinterlace/algo_yadif.c video_filter/deinterlace/algo_yadif.h \
+-	video_filter/deinterlace/yadif.h video_filter/deinterlace/yadif_template.h \
+ 	video_filter/deinterlace/algo_phosphor.c video_filter/deinterlace/algo_phosphor.h \
+ 	video_filter/deinterlace/algo_ivtc.c video_filter/deinterlace/algo_ivtc.h
+ # inline ASM doesn't build with -O0
+diff --git a/modules/video_filter/deinterlace/algo_yadif.c b/modules/video_filter/deinterlace/algo_yadif.c
+index a89d240..782b15d 100644
+--- a/modules/video_filter/deinterlace/algo_yadif.c
++++ b/modules/video_filter/deinterlace/algo_yadif.c
+@@ -1,5 +1,5 @@
+ /*****************************************************************************
+- * algo_yadif.c : Wrapper for FFmpeg's Yadif algorithm
++ * algo_yadif.c : Yadif entry points (GPL-free build: linear interpolation)
+  *****************************************************************************
+  * Copyright (C) 2000-2011 VLC authors and VideoLAN
+  * $Id$
+@@ -38,165 +38,22 @@
+ #include "common.h"      /* FFMIN3 et al. */
+ 
+ #include "algo_yadif.h"
++#include "algo_basic.h"
+ 
+ /*****************************************************************************
+- * Yadif (Yet Another DeInterlacing Filter).
++ * The Yadif algorithm (yadif.h and yadif_template.h, taken from FFmpeg) is
++ * published under the GNU General Public License, so it is not part of this
++ * build. The "yadif" and "yadif2x" modes are kept so that existing settings
++ * keep working; they use the linear interpolation of the "linear" mode.
+  *****************************************************************************/
+ 
+-/* yadif.h comes from yadif.c of FFmpeg project.
+-   Necessary preprocessor macros are defined in common.h. */
+-#include "yadif.h"
+-
+ int RenderYadifSingle( filter_t *p_filter, picture_t *p_dst, picture_t *p_src )
+ {
+-    return RenderYadif( p_filter, p_dst, p_src, 0, 0 );
++    return RenderLinear( p_filter, p_dst, p_src, 0, 0 );
+ }
+ 
+ int RenderYadif( filter_t *p_filter, picture_t *p_dst, picture_t *p_src,
+                  int i_order, int i_field )
+ {
+-    VLC_UNUSED(p_src);
+-
+-    filter_sys_t *p_sys = p_filter->p_sys;
+-
+-    /* */
+-    assert( i_order >= 0 && i_order <= 2 ); /* 2 = soft field repeat */
+-    assert( i_field == 0 || i_field == 1 );
+-
+-    /* As the pitches must match, use ONLY pictures coming from picture_New()! */
+-    picture_t *p_prev = p_sys->context.pp_history[0];
+-    picture_t *p_cur  = p_sys->context.pp_history[1];
+-    picture_t *p_next = p_sys->context.pp_history[2];
+-
+-    /* Account for soft field repeat.
+-
+-       The "parity" parameter affects the algorithm like this (from yadif.h):
+-       uint8_t *prev2= parity ? prev : cur ;
+-       uint8_t *next2= parity ? cur  : next;
+-
+-       The original parity expression that was used here is:
+-       (i_field ^ (i_order == i_field)) & 1
+-
+-       Truth table:
+-       i_field = 0, i_order = 0  => 1
+-       i_field = 1, i_order = 1  => 0
+-       i_field = 1, i_order = 0  => 1
+-       i_field = 0, i_order = 1  => 0
+-
+-       => equivalent with e.g.  (1 - i_order)  or  (i_order + 1) % 2
+-
+-       Thus, in a normal two-field frame,
+-             parity 1 = first field  (i_order == 0)
+-             parity 0 = second field (i_order == 1)
+-
+-       Now, with three fields, where the third is a copy of the first,
+-             i_order = 0  =>  parity 1 (as usual)
+-             i_order = 1  =>  due to the repeat, prev = cur, but also next = cur.
+-                              Because in such a case there is no motion
+-                              (otherwise field repeat makes no sense),
+-                              we don't actually need to invoke Yadif's filter().
+-                              Thus, set "parity" to 2, and use this to bypass
+-                              the filter.
+-             i_order = 2  =>  parity 0 (as usual)
+-    */
+-    int yadif_parity;
+-    if( p_cur  &&  p_cur->i_nb_fields > 2 )
+-        yadif_parity = (i_order + 1) % 3; /* 1, *2*, 0; where 2 is a special
+-                                             value meaning "bypass filter". */
+-    else
+-        yadif_parity = (i_order + 1) % 2; /* 1, 0 */
+-
+-    /* Filter if we have all the pictures we need */
+-    if( p_prev && p_cur && p_next )
+-    {
+-        /* */
+-        void (*filter)(uint8_t *dst, uint8_t *prev, uint8_t *cur, uint8_t *next,
+-                       int w, int prefs, int mrefs, int parity, int mode);
+-
+-/* android clang build for x86 fails as not enough registers are available */
+-#if !defined(__ANDROID__)
+-# if defined(HAVE_YADIF_SSSE3)
+-        if( vlc_CPU_SSSE3() )
+-            filter = yadif_filter_line_ssse3;
+-        else
+-# endif
+-# if defined(HAVE_YADIF_SSE2)
+-        if( vlc_CPU_SSE2() )
+-            filter = yadif_filter_line_sse2;
+-        else
+-# endif
+-# if defined(HAVE_YADIF_MMX)
+-        if( vlc_CPU_MMX() )
+-            filter = yadif_filter_line_mmx;
+-        else
+-# endif
+-#endif
+-            filter = yadif_filter_line_c;
+-
+-        if( p_sys->chroma->pixel_size == 2 )
+-            filter = yadif_filter_line_c_16bit;
+-
+-        for( int n = 0; n < p_dst->i_planes; n++ )
+-        {
+-            const plane_t *prevp = &p_prev->p[n];
+-            const plane_t *curp  = &p_cur->p[n];
+-            const plane_t *nextp = &p_next->p[n];
+-            plane_t *dstp        = &p_dst->p[n];
+-
+-            for( int y = 1; y < dstp->i_visible_lines - 1; y++ )
+-            {
+-                if( (y % 2) == i_field  ||  yadif_parity == 2 )
+-                {
+-                    memcpy( &dstp->p_pixels[y * dstp->i_pitch],
+-                                &curp->p_pixels[y * curp->i_pitch], dstp->i_visible_pitch );
+-                }
+-                else
+-                {
+-                    int mode;
+-                    /* Spatial checks only when enough data */
+-                    mode = (y >= 2 && y < dstp->i_visible_lines - 2) ? 0 : 2;
+-
+-                    assert( prevp->i_pitch == curp->i_pitch && curp->i_pitch == nextp->i_pitch );
+-                    filter( &dstp->p_pixels[y * dstp->i_pitch],
+-                            &prevp->p_pixels[y * prevp->i_pitch],
+-                            &curp->p_pixels[y * curp->i_pitch],
+-                            &nextp->p_pixels[y * nextp->i_pitch],
+-                            dstp->i_visible_pitch,
+-                            y < dstp->i_visible_lines - 2  ? curp->i_pitch : -curp->i_pitch,
+-                            y  - 1  ?  -curp->i_pitch : curp->i_pitch,
+-                            yadif_parity,
+-                            mode );
+-                }
+-
+-                /* We duplicate the first and last lines */
+-                if( y == 1 )
+-                    memcpy(&dstp->p_pixels[(y-1) * dstp->i_pitch],
+-                               &dstp->p_pixels[ y    * dstp->i_pitch],
+-                               dstp->i_pitch);
+-                else if( y == dstp->i_visible_lines - 2 )
+-                    memcpy(&dstp->p_pixels[(y+1) * dstp->i_pitch],
+-                               &dstp->p_pixels[ y    * dstp->i_pitch],
+-                               dstp->i_pitch);
+-            }
+-        }
+-
+-        p_sys->context.i_frame_offset = 1; /* p_cur will be rendered at next frame, too */
+-
+-        return VLC_SUCCESS;
+-    }
+-    else if( !p_prev && !p_cur && p_next )
+-    {
+-        /* NOTE: For the first frame, we use the default frame offset
+-                 as set by Open() or SetFilterMethod(). It is always 0. */
+-
+-        /* FIXME not good as it does not use i_order/i_field */
+-        RenderX( p_filter, p_dst, p_next );
+-        return VLC_SUCCESS;
+-    }
+-    else
+-    {
+-        p_sys->context.i_frame_offset = 1; /* p_cur will be rendered at next frame */
+-
+-        return VLC_EGENERIC;
+-    }
++    return RenderLinear( p_filter, p_dst, p_src, i_order, i_field );
+ }
+diff --git a/modules/video_filter/deinterlace/yadif.h b/modules/video_filter/deinterlace/yadif.h
+deleted file mode 100644
+index af16443..0000000
+--- a/modules/video_filter/deinterlace/yadif.h
++++ /dev/null
+@@ -1,153 +0,0 @@
+-/*
+- * Copyright (C) 2006 Michael Niedermayer <michaelni@gmx.at>
+- *
+- * This file is part of FFmpeg.
+- *
+- * FFmpeg is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+- *
+- * FFmpeg is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+- * GNU General Public License for more details.
+- *
+- * You should have received a copy of the GNU General Public License along
+- * with FFmpeg; if not, write to the Free Software Foundation, Inc.,
+- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+- */
+-
+-#ifdef HAVE_CONFIG_H
+-#   include "config.h"
+-#endif
+-
+-#include <stdalign.h>
+-
+-#if defined(__GNUC__)
+-# define ATTR_USED __attribute__((used))
+-#else
+-# define ATTR_USED
+-#endif
+-
+-typedef intptr_t x86_reg;
+-typedef struct { uint64_t a, b; } xmm_reg;
+-
+-const ATTR_USED alignas (16) xmm_reg pb_1 = {
+-    0x0101010101010101ULL, 0x0101010101010101ULL
+-};
+-const ATTR_USED alignas (16) xmm_reg pw_1 = {
+-    0x0001000100010001ULL, 0x0001000100010001ULL
+-};
+-
+-#ifdef CAN_COMPILE_SSSE3
+-#if defined(__SSE__) || defined(__GNUC__) || defined(__clang__)
+-// ================ SSSE3 =================
+-#define HAVE_YADIF_SSSE3
+-#define COMPILE_TEMPLATE_SSE 1
+-#define COMPILE_TEMPLATE_SSSE3 1
+-#define VLC_TARGET VLC_SSE
+-#define RENAME(a) a ## _ssse3
+-#include "yadif_template.h"
+-#undef COMPILE_TEMPLATE_SSE
+-#undef COMPILE_TEMPLATE_SSSE3
+-#undef VLC_TARGET
+-#undef RENAME
+-#endif
+-#endif
+-
+-#ifdef CAN_COMPILE_SSE2
+-#if defined(__SSE__) || defined(__GNUC__) || defined(__clang__)
+-// ================= SSE2 =================
+-#define HAVE_YADIF_SSE2
+-#define COMPILE_TEMPLATE_SSE 1
+-#define VLC_TARGET VLC_SSE
+-#define RENAME(a) a ## _sse2
+-#include "yadif_template.h"
+-#undef COMPILE_TEMPLATE_SSE
+-#undef VLC_TARGET
+-#undef RENAME
+-#endif
+-#endif
+-
+-#ifdef CAN_COMPILE_MMX
+-#if defined(__MMX__) || defined(__GNUC__) || defined(__clang__)
+-// ================ MMX =================
+-#define HAVE_YADIF_MMX
+-#define VLC_TARGET VLC_MMX
+-#define RENAME(a) a ## _mmx
+-#include "yadif_template.h"
+-#undef VLC_TARGET
+-#undef RENAME
+-#endif
+-#endif
+-
+-#define FFABS abs
+-
+-#define CHECK(j)\
+-    {   int score = FFABS(cur[mrefs-1+(j)] - cur[prefs-1-(j)])\
+-                  + FFABS(cur[mrefs  +(j)] - cur[prefs  -(j)])\
+-                  + FFABS(cur[mrefs+1+(j)] - cur[prefs+1-(j)]);\
+-        if (score < spatial_score) {\
+-            spatial_score= score;\
+-            spatial_pred= (cur[mrefs  +(j)] + cur[prefs  -(j)])>>1;\
+-
+-#define FILTER \
+-    for (x = 0;  x < w; x++) { \
+-        int c = cur[mrefs]; \
+-        int d = (prev2[0] + next2[0])>>1; \
+-        int e = cur[prefs]; \
+-        int temporal_diff0 = FFABS(prev2[0] - next2[0]); \
+-        int temporal_diff1 =(FFABS(prev[mrefs] - c) + FFABS(prev[prefs] - e) )>>1; \
+-        int temporal_diff2 =(FFABS(next[mrefs] - c) + FFABS(next[prefs] - e) )>>1; \
+-        int diff = FFMAX3(temporal_diff0>>1, temporal_diff1, temporal_diff2); \
+-        int spatial_pred = (c+e)>>1; \
+-        int spatial_score = FFABS(cur[mrefs-1] - cur[prefs-1]) + FFABS(c-e) \
+-                          + FFABS(cur[mrefs+1] - cur[prefs+1]) - 1; \
+- \
+-        CHECK(-1) CHECK(-2) }} }} \
+-        CHECK( 1) CHECK( 2) }} }} \
+- \
+-        if (mode < 2) { \
+-            int b = (prev2[2*mrefs] + next2[2*mrefs])>>1; \
+-            int f = (prev2[2*prefs] + next2[2*prefs])>>1; \
+-            int max = FFMAX3(d-e, d-c, FFMIN(b-c, f-e)); \
+-            int min = FFMIN3(d-e, d-c, FFMAX(b-c, f-e)); \
+- \
+-            diff = FFMAX3(diff, min, -max); \
+-        } \
+- \
+-        if (spatial_pred > d + diff) \
+-           spatial_pred = d + diff; \
+-        else if (spatial_pred < d - diff) \
+-           spatial_pred = d - diff; \
+- \
+-        dst[0] = spatial_pred; \
+- \
+-        dst++; \
+-        cur++; \
+-        prev++; \
+-        next++; \
+-        prev2++; \
+-        next2++; \
+-    }
+-
+-static void yadif_filter_line_c(uint8_t *dst, uint8_t *prev, uint8_t *cur, uint8_t *next, int w, int prefs, int mrefs, int parity, int mode) {
+-    int x;
+-    uint8_t *prev2= parity ? prev : cur ;
+-    uint8_t *next2= parity ? cur  : next;
+-    FILTER
+-}
+-
+-static void yadif_filter_line_c_16bit(uint8_t *dst8, uint8_t *prev8, uint8_t *cur8, uint8_t *next8, int w, int prefs, int mrefs, int parity, int mode) {
+-    uint16_t *dst = (uint16_t *)dst8;
+-    uint16_t *prev = (uint16_t *)prev8;
+-    uint16_t *cur = (uint16_t *)cur8;
+-    uint16_t *next = (uint16_t *)next8;
+-    int x;
+-    uint16_t *prev2= parity ? prev : cur ;
+-    uint16_t *next2= parity ? cur  : next;
+-    mrefs /= 2;
+-    prefs /= 2;
+-    FILTER
+-}
+diff --git a/modules/video_filter/deinterlace/yadif_template.h b/modules/video_filter/deinterlace/yadif_template.h
+deleted file mode 100644
+index df4897d..0000000
+--- a/modules/video_filter/deinterlace/yadif_template.h
++++ /dev/null
+@@ -1,282 +0,0 @@
+-/*
+- * Copyright (C) 2006 Michael Niedermayer <michaelni@gmx.at>
+- *
+- * This file is part of FFmpeg.
+- *
+- * FFmpeg is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License as published by
+- * the Free Software Foundation; either version 2 of the License, or
+- * (at your option) any later version.
+- *
+- * FFmpeg is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+- * GNU General Public License for more details.
+- *
+- * You should have received a copy of the GNU General Public License along
+- * with FFmpeg; if not, write to the Free Software Foundation, Inc.,
+- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+- */
+-
+-/* For some reason clang doens't like that %%rip macro */
+-
+-#if defined(__x86_64__) && !defined(__APPLE__)
+-#define MANGLE(a) "" #a "(%%rip)"
+-#define MANGLEVARIABLES [mode] "g"(mode),
+-#else
+-#define MANGLE(a) "" "%["#a"]"
+-#define MANGLEVARIABLES [pw_1] "m"(pw_1),\
+-             [pb_1] "m"(pb_1),\
+-             [mode] "g"(mode),
+-#endif
+-
+-#ifdef COMPILE_TEMPLATE_SSE
+-#define REGMM "xmm"
+-#define MM "%%"REGMM
+-#define MOV  "movq"
+-#define MOVQ "movdqa"
+-#define MOVQU "movdqu"
+-#define STEP 8
+-#define LOAD(mem,dst) \
+-            MOV"       "mem", "dst" \n\t"\
+-            "punpcklbw "MM"7, "dst" \n\t"
+-#define PSRL1(reg) "psrldq $1, "reg" \n\t"
+-#define PSRL2(reg) "psrldq $2, "reg" \n\t"
+-#define PSHUF(src,dst) "movdqa "dst", "src" \n\t"\
+-                       "psrldq $2, "src"     \n\t"
+-#else
+-#define REGMM "mm"
+-#define MM "%%"REGMM
+-#define MOV  "movd"
+-#define MOVQ "movq"
+-#define MOVQU "movq"
+-#define STEP 4
+-#define LOAD(mem,dst) \
+-            MOV"       "mem", "dst" \n\t"\
+-            "punpcklbw "MM"7, "dst" \n\t"
+-#define PSRL1(reg) "psrlq $8, "reg" \n\t"
+-#define PSRL2(reg) "psrlq $16, "reg" \n\t"
+-#define PSHUF(src,dst) "pshufw $9, "dst", "src" \n\t"
+-#endif
+-
+-#ifdef COMPILE_TEMPLATE_SSSE3
+-#define PABS(tmp,dst) \
+-            "pabsw     "dst", "dst" \n\t"
+-#else
+-#define PABS(tmp,dst) \
+-            "pxor     "tmp", "tmp" \n\t"\
+-            "psubw    "dst", "tmp" \n\t"\
+-            "pmaxsw   "tmp", "dst" \n\t"
+-#endif
+-
+-
+-#define CHECK(pj,mj) \
+-            MOVQU" "#pj"(%[cur],%[mrefs]), "MM"2 \n\t" /* cur[x-refs-1+j] */\
+-            MOVQU" "#mj"(%[cur],%[prefs]), "MM"3 \n\t" /* cur[x+refs-1-j] */\
+-            MOVQ"      "MM"2, "MM"4 \n\t"\
+-            MOVQ"      "MM"2, "MM"5 \n\t"\
+-            "pxor      "MM"3, "MM"4 \n\t"\
+-            "pavgb     "MM"3, "MM"5 \n\t"\
+-            "pand      "MANGLE(pb_1)", "MM"4 \n\t"\
+-            "psubusb   "MM"4, "MM"5 \n\t"\
+-            PSRL1(MM"5")                 \
+-            "punpcklbw "MM"7, "MM"5 \n\t" /* (cur[x-refs+j] + cur[x+refs-j])>>1 */\
+-            MOVQ"      "MM"2, "MM"4 \n\t"\
+-            "psubusb   "MM"3, "MM"2 \n\t"\
+-            "psubusb   "MM"4, "MM"3 \n\t"\
+-            "pmaxub    "MM"3, "MM"2 \n\t"\
+-            MOVQ"      "MM"2, "MM"3 \n\t"\
+-            MOVQ"      "MM"2, "MM"4 \n\t" /* ABS(cur[x-refs-1+j] - cur[x+refs-1-j]) */\
+-            PSRL1(MM"3")                  /* ABS(cur[x-refs  +j] - cur[x+refs  -j]) */\
+-            PSRL2(MM"4")                  /* ABS(cur[x-refs+1+j] - cur[x+refs+1-j]) */\
+-            "punpcklbw "MM"7, "MM"2 \n\t"\
+-            "punpcklbw "MM"7, "MM"3 \n\t"\
+-            "punpcklbw "MM"7, "MM"4 \n\t"\
+-            "paddw     "MM"3, "MM"2 \n\t"\
+-            "paddw     "MM"4, "MM"2 \n\t" /* score */
+-
+-#define CHECK1 \
+-            MOVQ"      "MM"0, "MM"3 \n\t"\
+-            "pcmpgtw   "MM"2, "MM"3 \n\t" /* if(score < spatial_score) */\
+-            "pminsw    "MM"2, "MM"0 \n\t" /* spatial_score= score; */\
+-            MOVQ"      "MM"3, "MM"6 \n\t"\
+-            "pand      "MM"3, "MM"5 \n\t"\
+-            "pandn     "MM"1, "MM"3 \n\t"\
+-            "por       "MM"5, "MM"3 \n\t"\
+-            MOVQ"      "MM"3, "MM"1 \n\t" /* spatial_pred= (cur[x-refs+j] + cur[x+refs-j])>>1; */
+-
+-#define CHECK2 /* pretend not to have checked dir=2 if dir=1 was bad.\
+-                  hurts both quality and speed, but matches the C version. */\
+-            "paddw    "MANGLE(pw_1)", "MM"6 \n\t"\
+-            "psllw     $14,   "MM"6 \n\t"\
+-            "paddsw    "MM"6, "MM"2 \n\t"\
+-            MOVQ"      "MM"0, "MM"3 \n\t"\
+-            "pcmpgtw   "MM"2, "MM"3 \n\t"\
+-            "pminsw    "MM"2, "MM"0 \n\t"\
+-            "pand      "MM"3, "MM"5 \n\t"\
+-            "pandn     "MM"1, "MM"3 \n\t"\
+-            "por       "MM"5, "MM"3 \n\t"\
+-            MOVQ"      "MM"3, "MM"1 \n\t"
+-
+-#if defined(__MINGW32__) && defined(_WIN32) && !defined(_WIN64)
+-__attribute__((__force_align_arg_pointer__))
+-#endif
+-VLC_TARGET static void RENAME(yadif_filter_line)(uint8_t *dst,
+-                              uint8_t *prev, uint8_t *cur, uint8_t *next,
+-                              int w, int prefs, int mrefs, int parity, int mode)
+-{
+-    uint8_t tmpU[5*16];
+-    uint8_t *tmp= (uint8_t*)(((uintptr_t)(tmpU+15)) & ~15);
+-    int x;
+-
+-#define FILTER\
+-    for(x=0; x<w; x+=STEP){\
+-        __asm__ volatile(\
+-            "pxor      "MM"7, "MM"7 \n\t"\
+-            LOAD("(%[cur],%[mrefs])", MM"0") /* c = cur[x-refs] */\
+-            LOAD("(%[cur],%[prefs])", MM"1") /* e = cur[x+refs] */\
+-            LOAD("(%["prev2"])", MM"2") /* prev2[x] */\
+-            LOAD("(%["next2"])", MM"3") /* next2[x] */\
+-            MOVQ"      "MM"3, "MM"4 \n\t"\
+-            "paddw     "MM"2, "MM"3 \n\t"\
+-            "psraw     $1,    "MM"3 \n\t" /* d = (prev2[x] + next2[x])>>1 */\
+-            MOVQ"      "MM"0,   (%[tmp]) \n\t" /* c */\
+-            MOVQ"      "MM"3, 16(%[tmp]) \n\t" /* d */\
+-            MOVQ"      "MM"1, 32(%[tmp]) \n\t" /* e */\
+-            "psubw     "MM"4, "MM"2 \n\t"\
+-            PABS(      MM"4", MM"2") /* temporal_diff0 */\
+-            LOAD("(%[prev],%[mrefs])", MM"3") /* prev[x-refs] */\
+-            LOAD("(%[prev],%[prefs])", MM"4") /* prev[x+refs] */\
+-            "psubw     "MM"0, "MM"3 \n\t"\
+-            "psubw     "MM"1, "MM"4 \n\t"\
+-            PABS(      MM"5", MM"3")\
+-            PABS(      MM"5", MM"4")\
+-            "paddw     "MM"4, "MM"3 \n\t" /* temporal_diff1 */\
+-            "psrlw     $1,    "MM"2 \n\t"\
+-            "psrlw     $1,    "MM"3 \n\t"\
+-            "pmaxsw    "MM"3, "MM"2 \n\t"\
+-            LOAD("(%[next],%[mrefs])", MM"3") /* next[x-refs] */\
+-            LOAD("(%[next],%[prefs])", MM"4") /* next[x+refs] */\
+-            "psubw     "MM"0, "MM"3 \n\t"\
+-            "psubw     "MM"1, "MM"4 \n\t"\
+-            PABS(      MM"5", MM"3")\
+-            PABS(      MM"5", MM"4")\
+-            "paddw     "MM"4, "MM"3 \n\t" /* temporal_diff2 */\
+-            "psrlw     $1,    "MM"3 \n\t"\
+-            "pmaxsw    "MM"3, "MM"2 \n\t"\
+-            MOVQ"      "MM"2, 48(%[tmp]) \n\t" /* diff */\
+-\
+-            "paddw     "MM"0, "MM"1 \n\t"\
+-            "paddw     "MM"0, "MM"0 \n\t"\
+-            "psubw     "MM"1, "MM"0 \n\t"\
+-            "psrlw     $1,    "MM"1 \n\t" /* spatial_pred */\
+-            PABS(      MM"2", MM"0")      /* ABS(c-e) */\
+-\
+-            MOVQU" -1(%[cur],%[mrefs]), "MM"2 \n\t" /* cur[x-refs-1] */\
+-            MOVQU" -1(%[cur],%[prefs]), "MM"3 \n\t" /* cur[x+refs-1] */\
+-            MOVQ"      "MM"2, "MM"4 \n\t"\
+-            "psubusb   "MM"3, "MM"2 \n\t"\
+-            "psubusb   "MM"4, "MM"3 \n\t"\
+-            "pmaxub    "MM"3, "MM"2 \n\t"\
+-            PSHUF(MM"3", MM"2") \
+-            "punpcklbw "MM"7, "MM"2 \n\t" /* ABS(cur[x-refs-1] - cur[x+refs-1]) */\
+-            "punpcklbw "MM"7, "MM"3 \n\t" /* ABS(cur[x-refs+1] - cur[x+refs+1]) */\
+-            "paddw     "MM"2, "MM"0 \n\t"\
+-            "paddw     "MM"3, "MM"0 \n\t"\
+-            "psubw    "MANGLE(pw_1)", "MM"0 \n\t" /* spatial_score */\
+-\
+-            CHECK(-2,0)\
+-            CHECK1\
+-            CHECK(-3,1)\
+-            CHECK2\
+-            CHECK(0,-2)\
+-            CHECK1\
+-            CHECK(1,-3)\
+-            CHECK2\
+-\
+-            /* if(p->mode<2) ... */\
+-            MOVQ"    48(%[tmp]), "MM"6 \n\t" /* diff */\
+-            "cmpl      $2, %[mode] \n\t"\
+-            "jge       1f \n\t"\
+-            LOAD("(%["prev2"],%[mrefs],2)", MM"2") /* prev2[x-2*refs] */\
+-            LOAD("(%["next2"],%[mrefs],2)", MM"4") /* next2[x-2*refs] */\
+-            LOAD("(%["prev2"],%[prefs],2)", MM"3") /* prev2[x+2*refs] */\
+-            LOAD("(%["next2"],%[prefs],2)", MM"5") /* next2[x+2*refs] */\
+-            "paddw     "MM"4, "MM"2 \n\t"\
+-            "paddw     "MM"5, "MM"3 \n\t"\
+-            "psrlw     $1,    "MM"2 \n\t" /* b */\
+-            "psrlw     $1,    "MM"3 \n\t" /* f */\
+-            MOVQ"   (%[tmp]), "MM"4 \n\t" /* c */\
+-            MOVQ" 16(%[tmp]), "MM"5 \n\t" /* d */\
+-            MOVQ" 32(%[tmp]), "MM"7 \n\t" /* e */\
+-            "psubw     "MM"4, "MM"2 \n\t" /* b-c */\
+-            "psubw     "MM"7, "MM"3 \n\t" /* f-e */\
+-            MOVQ"      "MM"5, "MM"0 \n\t"\
+-            "psubw     "MM"4, "MM"5 \n\t" /* d-c */\
+-            "psubw     "MM"7, "MM"0 \n\t" /* d-e */\
+-            MOVQ"      "MM"2, "MM"4 \n\t"\
+-            "pminsw    "MM"3, "MM"2 \n\t"\
+-            "pmaxsw    "MM"4, "MM"3 \n\t"\
+-            "pmaxsw    "MM"5, "MM"2 \n\t"\
+-            "pminsw    "MM"5, "MM"3 \n\t"\
+-            "pmaxsw    "MM"0, "MM"2 \n\t" /* max */\
+-            "pminsw    "MM"0, "MM"3 \n\t" /* min */\
+-            "pxor      "MM"4, "MM"4 \n\t"\
+-            "pmaxsw    "MM"3, "MM"6 \n\t"\
+-            "psubw     "MM"2, "MM"4 \n\t" /* -max */\
+-            "pmaxsw    "MM"4, "MM"6 \n\t" /* diff= MAX3(diff, min, -max); */\
+-            "1: \n\t"\
+-\
+-            MOVQ" 16(%[tmp]), "MM"2 \n\t" /* d */\
+-            MOVQ"      "MM"2, "MM"3 \n\t"\
+-            "psubw     "MM"6, "MM"2 \n\t" /* d-diff */\
+-            "paddw     "MM"6, "MM"3 \n\t" /* d+diff */\
+-            "pmaxsw    "MM"2, "MM"1 \n\t"\
+-            "pminsw    "MM"3, "MM"1 \n\t" /* d = clip(spatial_pred, d-diff, d+diff); */\
+-            "packuswb  "MM"1, "MM"1 \n\t"\
+-\
+-            ::[prev] "r"(prev),\
+-             [cur]  "r"(cur),\
+-             [next] "r"(next),\
+-             [prefs]"r"((x86_reg)prefs),\
+-             [mrefs]"r"((x86_reg)mrefs),\
+-             MANGLEVARIABLES\
+-             [tmp]  "r"(tmp)\
+-        );\
+-        __asm__ volatile(MOV" "MM"1, %0" :"=m"(*dst));\
+-        dst += STEP;\
+-        prev+= STEP;\
+-        cur += STEP;\
+-        next+= STEP;\
+-    }
+-
+-    if (parity) {
+-#define prev2 "prev"
+-#define next2 "cur"
+-        FILTER
+-#undef prev2
+-#undef next2
+-    } else {
+-#define prev2 "cur"
+-#define next2 "next"
+-        FILTER
+-#undef prev2
+-#undef next2
+-    }
+-}
+-#undef STEP
+-#undef REGMM
+-#undef MM
+-#undef MOV
+-#undef MOVQ
+-#undef MOVQU
+-#undef PSHUF
+-#undef PSRL1
+-#undef PSRL2
+-#undef LOAD
+-#undef PABS
+-#undef CHECK
+-#undef CHECK1
+-#undef CHECK2
+-#undef FILTER
+-

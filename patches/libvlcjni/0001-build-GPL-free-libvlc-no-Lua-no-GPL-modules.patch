@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: build <build@localhost>
+Date: Tue, 10 Nov 2026 21:03:43 +0100
+Subject: [PATCH 1/2] build: GPL-free libvlc (no Lua, no GPL modules)
+
+- disable Lua (the lua module and the scripts shipped as assets are GPL)
+- blacklist the modules that are GPL (hqdn3d, rotate, mono, headphone,
+  dolby surround, rtp, rtsp vod, logger, dummy interface, ...)
+- never link a module whose exported license string is GPL
+- print the effective bootstrap/configure options in the build log
+---
+ buildsystem/compile-libvlc.sh | 34 +++++++++++++++++++++++++++++++---
+ libvlc/build.gradle           | 20 --------------------
+ 2 files changed, 31 insertions(+), 23 deletions(-)
+
+diff --git a/buildsystem/compile-libvlc.sh b/buildsystem/compile-libvlc.sh
+index f9c4a17..95b0e1f 100755
+--- a/buildsystem/compile-libvlc.sh
++++ b/buildsystem/compile-libvlc.sh
+@@ -255,7 +255,16 @@ avlc_checkfail()
+ 
+ avlc_find_modules()
+ {
+-    echo "$(find $1 -name 'lib*plugin.a' | grep -vE "lib(${blacklist_regexp})_plugin.a" | tr '\n' ' ')"
++    # GPL-free build: a module that declares a GPL license (VLC_MODULE_LICENSE,
++    # exported as vlc_entry_license__* and stored as a string) is never linked.
++    for avlc_module in $(find $1 -name 'lib*plugin.a' | grep -vE "lib(${blacklist_regexp})_plugin.a"); do
++        if strings -a "$avlc_module" | grep -qE 'terms of the GNU (Affero )?General Public License'; then
++            echo "GPL-free build: dropping GPL module $(basename "$avlc_module")" >&2
++            continue
++        fi
++        printf '%s ' "$avlc_module"
++    done
++    echo
+ }
+ 
+ avlc_get_symbol()
+@@ -293,7 +302,7 @@ VLC_CONTRIB_ARGS="\
+     --disable-dca \
+     --disable-goom \
+     --disable-chromaprint \
+-    --enable-lua \
++    --disable-lua \
+     --disable-schroedinger \
+     --disable-sdl \
+     --disable-SDL_image \
+@@ -354,7 +363,7 @@ VLC_CONFIGURE_ARGS="\
+     --disable-update-check \
+     --disable-vlm \
+     --disable-dbus \
+-    --enable-lua \
++    --disable-lua \
+     --disable-vcd \
+     --disable-v4l2 \
+     --enable-bluray \
+@@ -453,6 +462,19 @@ VLC_MODULE_BLACKLIST="
+     aout_file
+     yuv
+     .dummy
++    hqdn3d
++    i420_rgb_mmx
++    rotate
++    mono
++    headphone_channel_mixer
++    dolby_surround_decoder
++    stream_out_rtp
++    vod_rtsp
++    access_realrtsp
++    file_logger
++    syslog
++    dummy
++    lua
+ "
+ 
+ ###########################
+@@ -523,6 +545,12 @@ case $AVLC_CONTRIB_LICENSE in
+     ;;
+ esac
+ 
++# Recorded in the build log (BUILD-INFO.txt of the LGPL recipe picks these lines up)
++echo "BUILD-OPTIONS license: ${AVLC_CONTRIB_LICENSE}"
++echo "BUILD-OPTIONS contrib-bootstrap:" $VLC_CONTRIB_ARGS
++echo "BUILD-OPTIONS vlc-configure:" $VLC_CONFIGURE_ARGS
++echo "BUILD-OPTIONS module-blacklist:" $VLC_MODULE_BLACKLIST
++
+ export USE_FFMPEG=1
+ (cd $VLC_CONTRIB_DIR && ANDROID_ABI=${ANDROID_ABI} ANDROID_API=${ANDROID_API} \
+     ../bootstrap --host=${TARGET_TUPLE} ${VLC_CONTRIB_ARGS})
+diff --git a/libvlc/build.gradle b/libvlc/build.gradle
+index 384451b..958d37e 100644
+--- a/libvlc/build.gradle
++++ b/libvlc/build.gradle
+@@ -28,9 +28,6 @@ android {
+         tasks.whenTaskAdded { task ->
+             if (task.name.startsWith('merge')) {
+                 task.dependsOn hrtfsCopy
+-                task.dependsOn luaPlaylistCopy
+-                task.dependsOn luaMetaCopy
+-                task.dependsOn luaModuleCopy
+             }
+         }
+ 
+@@ -76,23 +73,6 @@ android {
+         into 'assets/hrtfs'
+     }
+ 
+-    task luaPlaylistCopy(type: Copy) {
+-        from '../vlc/share/lua/playlist'
+-        into 'assets/lua/playlist'
+-        exclude '**/*.txt'
+-    }
+-
+-    task luaModuleCopy(type: Copy) {
+-        from '../vlc/share/lua/modules'
+-        into 'assets/lua/modules'
+-        exclude '**/*.txt'
+-    }
+-
+-    task luaMetaCopy(type: Copy) {
+-        from '../vlc/share/lua/meta'
+-        into 'assets/lua/meta'
+-        exclude '**/*.txt'
+-    }
+     buildFeatures {
+         buildConfig = true
+     }
