@@ -173,14 +173,20 @@ else
   fail "libvlcjni sources contain GPL-only file(s)"
 fi
 cat "$TMP/tree.txt" >> "$REPORT"
-for sofa in "$TMP"/aar/assets/hrtfs/*; do
-  [ -f "$sofa" ] || continue
-  # The SOFA files carry their own license in their attributes (HDF5 strings).
-  if strings -a "$sofa" | grep -q 'GNU Lesser General Public License' && ! strings -a "$sofa" | grep -qE 'GNU General Public License'; then
-    ok "$(basename "$sofa"): declares the LGPL ($(strings -a "$sofa" | grep -m1 'Copyright'))"
+# The SOFA files carry their own license in their attributes (HDF5 strings, stored
+# uncompressed). Read into a variable: "strings | grep -q" under pipefail fails on SIGPIPE.
+check_sofa() {
+  local sofa="$1" txt
+  txt=$(strings -a "$sofa")
+  if printf '%s\n' "$txt" | grep -q 'GNU Lesser General Public License' \
+     && ! printf '%s\n' "$txt" | grep -q 'GNU General Public License'; then
+    ok "$(basename "$sofa"): declares the LGPL ($(printf '%s\n' "$txt" | grep -m1 'Copyright'))"
   else
     fail "$(basename "$sofa"): no clear LGPL declaration inside the file"
   fi
+}
+for sofa in "$TMP"/aar/assets/hrtfs/*; do
+  [ -f "$sofa" ] && check_sofa "$sofa"
 done
 
 # ------------------------------------------------------------------ F ----
