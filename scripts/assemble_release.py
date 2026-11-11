@@ -170,6 +170,9 @@ def main():
                 die("%s: no %s in the build output" % (b["abi"], pat))
             short = re.match(r"(?:vlc|libvlcjni)-([0-9a-f]+)-patched", os.path.basename(found[0])).group(1)
             shutil.copy(found[0], os.path.join(out, target % short))
+        mp = os.path.join(b["dir"], "libvlc-link.map.gz")
+        if os.path.isfile(mp):
+            shutil.copy(mp, os.path.join(out, "libvlc-link-%s.map.gz" % b["abi"]))
         for pat, target in (("contrib-tarballs.tar", "contrib-tarballs-%s.tar"), ("CONTRIB-SOURCES.sha256", "CONTRIB-SOURCES-%s.sha256")):
             found = [f for d in src_dirs for f in glob.glob(os.path.join(d, pat))]
             if not found:

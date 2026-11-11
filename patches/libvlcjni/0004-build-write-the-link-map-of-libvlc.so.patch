@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: build <build@localhost>
+Date: Thu, 12 Nov 2026 12:00:00 +0100
+Subject: [PATCH] build: write the link map of libvlc.so
+
+The license audit judges contribs on what the linker took from the static
+libraries (archive members in libvlc-link.map), not on what is installed in the
+contrib prefix.
+---
+ libvlc/jni/Android.mk | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/libvlc/jni/Android.mk b/libvlc/jni/Android.mk
+index a165816..6c6c111 100644
+--- a/libvlc/jni/Android.mk
++++ b/libvlc/jni/Android.mk
+@@ -26,6 +26,8 @@ LOCAL_SRC_FILES := $(VLC_BUILD_DIR)/ndk/libvlcjni-modules.c \
+ 				   $(VLC_BUILD_DIR)/ndk/dummy.cpp
+ LOCAL_HAS_CPP := true
+ LOCAL_LDFLAGS := -L$(VLC_CONTRIB)/lib
++# GPL-free build audit: which archive members the linker took (libvlc-link.map)
++LOCAL_LDFLAGS += -Wl,-Map=$(VLC_BUILD_DIR)/libvlc-link.map
+ LOCAL_LDLIBS := \
+     $(VLC_MODULES) \
+     $(VLC_BUILD_DIR)/lib/.libs/libvlc.a \

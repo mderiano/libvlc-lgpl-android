@@ -251,13 +251,15 @@ section "H. GPL-only source files of the contribs (compiled and linked)"
 # library, refuses the build. What is found is listed here, including accepted exceptions
 # (gpl-exceptions.tsv, README "Audit exceptions") and GPL files that were not compiled.
 if python3 -I "$HERE/scripts/audit_licenses.py" contribs --contrib-build "$CONTRIB_BUILD" \
-     --contrib-install "$CONTRIB" --exceptions "$HERE/gpl-exceptions.tsv" > "$TMP/contribs.txt" 2>&1; then
+     --contrib-install "$CONTRIB" --link-map "$OUT/libvlc-link.map" \
+     --exceptions "$HERE/gpl-exceptions.tsv" > "$TMP/contribs.txt" 2>&1; then
   rch=0
 else
   rch=$?
 fi
+[ -s "$OUT/libvlc-link.map" ] || warn "no link map of libvlc.so (libvlc-link.map): contribs judged on the installed libraries only"
 cat "$TMP/contribs.txt" >> "$REPORT"
-grep -E '^(Contrib packages|Linked-library|SUMMARY|ERROR)' "$TMP/contribs.txt"
+grep -E '^(Contrib packages|Link map|Linked-library|SUMMARY|ERROR)' "$TMP/contribs.txt"
 grep -E '^  (FAIL|EXCEPTION|info)' "$TMP/contribs.txt" | cut -c1-240 | head -n 40
 case "$rch" in
   0) ok "no GPL-only file compiled and linked from the contribs" ;;

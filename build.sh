@@ -13,6 +13,7 @@
 #   BUILD-INFO.txt                              commits, options, NDK, hashes
 #   SHA256SUMS.txt                              AAR and the .so files inside it
 #   LICENSE-AUDIT.txt                           written by check-no-gpl.sh
+#   libvlc-link.map                             archive members the linker took for libvlc.so
 #   build.log                                   complete log
 #   source/                                     corresponding source (LGPL)
 #
@@ -156,6 +157,7 @@ cp "$AAR_SRC" "$OUT/$AAR_NAME"
 BUILD_DIR="$VLC/build-android-$TUPLE"
 CONTRIB_DIR="$VLC/contrib/contrib-android-$TUPLE"
 cp "$CONTRIB_DIR/config.mak" "$OUT/contrib-config.mak" 2>/dev/null || true
+cp "$BUILD_DIR/libvlc-link.map" "$OUT/libvlc-link.map" 2>/dev/null || echo "== warning: no link map of libvlc.so"
 grep -m1 '^  \$ ' "$BUILD_DIR/config.log" > "$OUT/vlc-configure-invocation.txt" 2>/dev/null || true
 
 NATIVE_DIR="$(mktemp -d)"

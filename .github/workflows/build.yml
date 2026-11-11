@@ -127,6 +127,7 @@ jobs:
         if: always()
         run: |
           if [ -f "$RUNNER_TEMP/out/build.log" ]; then gzip -9 -k -f "$RUNNER_TEMP/out/build.log"; fi
+          if [ -f "$RUNNER_TEMP/out/libvlc-link.map" ]; then gzip -9 -k -f "$RUNNER_TEMP/out/libvlc-link.map"; fi
           df -h /
           ls -la "$RUNNER_TEMP/out" || true
 
@@ -157,6 +158,7 @@ jobs:
             ${{ runner.temp }}/out/LICENSE-AUDIT.txt
             ${{ runner.temp }}/out/contrib-config.mak
             ${{ runner.temp }}/out/vlc-configure-invocation.txt
+            ${{ runner.temp }}/out/libvlc-link.map.gz
           if-no-files-found: warn
           retention-days: 90
 

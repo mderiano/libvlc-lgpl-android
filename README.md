@@ -78,6 +78,9 @@ still contains GPL modules, which the patches of this repository remove:
   `--disable-zvbi` and blacklists the `zvbi` module. VLC then builds its own LGPL
   `telx` module instead (the one VLC uses when zvbi is absent). `v3.7.0-lgpl.1`
   linked libzvbi: its audit did not look for it.
+* `patches/libvlcjni/0004`: `libvlc.so` is linked with `-Wl,-Map` (`libvlc-link.map`,
+  uploaded as `libvlc-link.map.gz`, released as `libvlc-link-<abi>.map.gz`): the audit
+  uses it to know which archive members the linker really took.
 * `patches/vlc/0001`: the yadif deinterlacing algorithm (`yadif.h`,
   `yadif_template.h`, taken from FFmpeg, GPL) is removed from the deinterlace
   module. The `yadif` and `yadif2x` modes remain selectable and use the `linear`
@@ -196,12 +199,12 @@ The list is empty on purpose. Section H classifies each GPL-only source file fro
 in the build tree: *not compiled* (no object file: tests, tools, FFmpeg's GPL filters and
 libpostproc that `--disable-gpl` leaves out), *compiled but in no installed library*
 (programs and tests: the object's SHA-256 is not that of any member of the installed
-`.a` files) or *compiled and linked* (refused). Only an entry in `gpl-exceptions.tsv`
+`.a` files), *installed but not taken by the linker* (listed as info)  or *compiled and linked* (refused). Only an entry in `gpl-exceptions.tsv`
 (package glob, path regex, justification) accepts a linked file, and each entry needs a
-verifiable fact such as a dual license read in the file. History: the first multi-ABI run
+verifiable fact such as a dual license read in the file. Objects of out-of-tree builds (`gettext/_build/gettext-runtime/src/...`) are matched to a source only through the directory path they mirror. History: the first multi-ABI run
 (43012012675) refused six gettext files because the first version matched objects to
 libraries by file name (`gettext.c`, `options.c`, `plural-exp.c`, ... collide with
-libintl's objects); the content comparison replaced it. Without object files (the
+libintl's objects); the content comparison replaced it. The second run (43025242659) still refused five gettext files (`gettext-tools/src/plural-exp.c`, `gettext-tools/tests/setlocale.c`, `gettext-tools/gnulib-tests/locale.c`, `gettext-runtime/src/gettext.c`, `ngettext.c`, GPL-only headers, tools disabled or not archived): the build tree of gettext is out of tree, so a stem match took `gettext-runtime/intl/gettext.o` (LGPL, in libintl.a) for a program's object. The directory-mirroring rule fixes that. Without object files (the
 corresponding-source tarballs) every source counts as compiled and linked: the check
 can only over-report there.
 

@@ -3,7 +3,7 @@
 
   audit_licenses.py modules --vlc DIR --build DIR     modules really linked in libvlc.so
   audit_licenses.py tree DIR [DIR...]                 source headers of a directory tree
-  audit_licenses.py contribs --contrib-build DIR [--contrib-install DIR] [--exceptions FILE]
+  audit_licenses.py contribs --contrib-build DIR [--contrib-install DIR] [--link-map FILE] [--exceptions FILE]
                                                       GPL-only files of the contribs (third-party libraries)
   audit_licenses.py symbols FILE.so [FILE.so...]      libzvbi / vbi_ symbols in shared libraries
 
@@ -250,30 +250,41 @@ def stem_match(stem, stems):
     return any(s == stem or s.endswith("_" + stem) or s.endswith("-" + stem) for s in stems)
 
 
-def ar_member_hashes(path):
-    """SHA-256 of the data of every member of an ar archive (GNU and BSD formats)."""
+def ar_members(path):
+    """[(member name, SHA-256 of its data)] of an ar archive (GNU, GNU long names, BSD)."""
     import hashlib
-    hashes = set()
+    members = []
+    longnames = b""
     with open(path, "rb") as f:
         if f.read(8) != b"!<arch>\n":
-            return hashes
+            return members
         while True:
             h = f.read(60)
             if len(h) < 60:
                 break
-            name = h[:16].decode("ascii", "replace").strip()
+            raw = h[:16].decode("ascii", "replace").strip()
             size = int(h[48:58])
-            data_size = size
-            skip = 0
-            if name.startswith("#1/"):          # BSD: the name is stored in front of the data
-                skip = int(name[3:])
-            data = f.read(data_size)
+            data = f.read(size)
             if size % 2:
                 f.read(1)
-            if name in ("/", "//", "/SYM64/") or name.startswith("__.SYMDEF"):
+            if raw == "//":
+                longnames = data
                 continue
-            hashes.add(hashlib.sha256(data[skip:]).hexdigest())
-    return hashes
+            if raw in ("/", "/SYM64/") or raw.startswith("__.SYMDEF"):
+                continue
+            body = data
+            if raw.startswith("#1/"):                       # BSD long name in front of the data
+                n = int(raw[3:])
+                name = data[:n].rstrip(b"\0").decode("ascii", "replace")
+                body = data[n:]
+            elif raw.startswith("/") and raw[1:].isdigit():  # GNU long name in the // table
+                off = int(raw[1:])
+                end = longnames.find(b"/\n", off)
+                name = longnames[off:end].decode("ascii", "replace")
+            else:
+                name = raw.rstrip("/")
+            members.append((name, hashlib.sha256(body).hexdigest()))
+    return members
 
 
 def file_hash(path):
@@ -283,18 +294,28 @@ def file_hash(path):
 
 
 def archive_evidence(libdir):
-    """(object stems, member hashes) of the static libraries installed in libdir."""
-    stems, hashes = set(), set()
+    """(object stems, {member SHA-256: {(archive file, member name)}}) of the installed static libraries."""
+    stems, hashes = set(), {}
     if not libdir or not os.path.isdir(libdir):
         return None
-    for f in os.listdir(libdir):
+    for f in sorted(os.listdir(libdir)):
         if f.endswith(".a"):
-            out = subprocess.run(["ar", "t", os.path.join(libdir, f)], capture_output=True, text=True)
-            for m in out.stdout.split():
-                if m.endswith(OBJ_EXT):
-                    stems.add(obj_stem(m))
-            hashes |= ar_member_hashes(os.path.join(libdir, f))
+            for name, digest in ar_members(os.path.join(libdir, f)):
+                if name.endswith(OBJ_EXT):
+                    stems.add(obj_stem(name))
+                    hashes.setdefault(digest, set()).add((f, name))
     return (stems, hashes) if stems else None
+
+
+def read_link_map(path):
+    """{(archive file, member name)} of the archive members the linker took (map of libvlc.so)."""
+    pulled = set()
+    rx = re.compile(r"(?:^|[\s/])([^\s/()]+\.a)\(([^)]+)\)")
+    with open(path, errors="replace") as f:
+        for line in f:
+            for m in rx.finditer(line):
+                pulled.add((m.group(1), m.group(2)))
+    return pulled
 
 
 def load_exceptions(path):
@@ -314,7 +335,7 @@ def load_exceptions(path):
     return rules
 
 
-def audit_contribs(build, exceptions_file, install=None):
+def audit_contribs(build, exceptions_file, install=None, link_map=None):
     import fnmatch
     build = os.path.realpath(build)
     if not os.path.isdir(build):
@@ -330,9 +351,13 @@ def audit_contribs(build, exceptions_file, install=None):
     evidence = archive_evidence(os.path.join(install, "lib")) if install else None
     lib_stems, lib_hashes = evidence if evidence else (None, None)
     violations, excepted = [], []
+    installed_only = []
     tools = 0
     notcompiled = 0
+    pulled = (read_link_map(link_map) if link_map and os.path.isfile(link_map) else None) or None
     print("Contrib packages scanned: %d (directory %s)" % (len(pkgs), build))
+    print("Link map of libvlc.so: %s" % (
+        "%d archive members linked" % len(pulled) if pulled else "none: judged on the installed libraries only"))
     print("Linked-library evidence: %s" % (
         "%d object names, %d object contents (SHA-256) in the installed static libraries" % (len(lib_stems), len(lib_hashes))
         if lib_stems else "none, every compiled file is assumed linked"))
@@ -355,6 +380,17 @@ def audit_contribs(build, exceptions_file, install=None):
         # byte for byte in an installed library; otherwise (stripped or rewritten
         # objects) the object name is the only evidence and the audit over-reports.
         by_content = bool(lib_hashes) and any(file_hash(path) in lib_hashes for _st, path in all_objs)
+        # Out-of-tree autotools/cmake builds mirror the source tree (_build/gettext-runtime/src/):
+        # then an object belongs to a source only if its directory contains the source's directory
+        # path. Without any such mirroring (meson: dir_file.c.o) the object name is all there is.
+        def comps(path):
+            return [c for c in os.path.relpath(path, root).split(os.sep) if c not in (".", ".libs")]
+
+        def contains(big, small):
+            return bool(small) and any(big[i:i + len(small)] == small for i in range(len(big) - len(small) + 1))
+
+        src_comps = {d: comps(d) for d in src_dirs}
+        mirrored = (not in_tree) and any(contains(comps(o[0]), sc) for o in objs for sc in src_comps.values() if sc)
         total = 0
         gpl_files = []
         for r, dirs, files in os.walk(root):
@@ -371,7 +407,13 @@ def audit_contribs(build, exceptions_file, install=None):
                     cands = None
                     compiled = True
                 else:
-                    pool = by_dir.get(r, []) if in_tree else all_objs
+                    if in_tree:
+                        pool = by_dir.get(r, [])
+                    elif mirrored:
+                        sc = comps(r)
+                        pool = [(st_, pth) for d_, st_, pth in objs if contains(comps(d_), sc)] if sc else []
+                    else:
+                        pool = all_objs
                     cands = [path for st, path in pool if st == stem or st.endswith("_" + stem) or st.endswith("-" + stem)]
                     compiled = bool(cands)
                 if not compiled:
@@ -379,7 +421,15 @@ def audit_contribs(build, exceptions_file, install=None):
                 elif lib_stems is None:
                     linked = True
                 elif by_content and cands is not None:
-                    linked = any(file_hash(c) in lib_hashes for c in cands)
+                    members = set()
+                    for c in cands:
+                        members |= lib_hashes.get(file_hash(c), set())
+                    linked = bool(members)
+                    if linked and pulled is not None:
+                        # installed is not delivered: the linker must have taken that member
+                        linked = any(m in pulled for m in members)
+                        if not linked:
+                            installed_only.append((pkg, os.path.relpath(p, root), sorted(members)[0]))
                 else:
                     linked = stem_match(stem, lib_stems)
                 gpl_files.append((os.path.relpath(p, root), compiled, linked))
@@ -396,6 +446,10 @@ def audit_contribs(build, exceptions_file, install=None):
                 continue
             if not linked:
                 tools += 1
+                im = [i for i in installed_only if i[0] == pkg and i[1] == rel]
+                if im:
+                    print("  info %-34s %s: GPL-only header, object installed in %s(%s) but NOT taken by the linker (map)" % (pkg, rel, im[0][2][0], im[0][2][1]))
+                    continue
                 print("  info %-34s %s: GPL-only header, compiled but in no installed library (tool/test)" % (pkg, rel))
                 continue
             why = None
@@ -466,7 +520,7 @@ def main(argv):
         if "--contrib-build" not in opts:
             print(__doc__)
             return 2
-        return audit_contribs(opts["--contrib-build"], opts.get("--exceptions"), opts.get("--contrib-install"))
+        return audit_contribs(opts["--contrib-build"], opts.get("--exceptions"), opts.get("--contrib-install"), opts.get("--link-map"))
     if len(argv) >= 3 and argv[1] == "symbols":
         return audit_symbols(argv[2:])
     if len(argv) >= 3 and argv[1] == "tree":
