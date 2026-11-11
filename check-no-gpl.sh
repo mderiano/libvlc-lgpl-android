@@ -18,7 +18,7 @@
 #  E. AAR content: no Lua assets; Java and JNI sources of libvlcjni: no GPL-only file.
 #  F. report of what is linked (contrib libraries and versions), for the notice.
 #  A2. no libzvbi (GPL-2 files pdc.c, packet-830.c, exp-vtx.c): no "libzvbi" name and
-#     no vbi_* symbol in any .so (seen in v3.7.0-lgpl.1, which linked libzvbi 0.2.35).
+#     none of libzvbi API identifiers (scripts/zvbi-api-symbols.txt) in any .so (seen in v3.7.0-lgpl.1, which linked libzvbi 0.2.35).
 #  H. every contrib that was built: no source file with a GPL-only header that is
 #     compiled and archived in an installed static library (scripts/audit_licenses.py
 #     contribs), except the written, justified list gpl-exceptions.tsv (README).
@@ -124,7 +124,7 @@ section "A2. libzvbi (GPL-2 files) is not linked"
 # remove it; the recipe disables the contrib and the VLC zvbi module (patch 0003).
 if python3 -I "$HERE/scripts/audit_licenses.py" symbols $SOS > "$TMP/zvbi.txt" 2>&1; then
   cat "$TMP/zvbi.txt" >> "$REPORT"
-  ok "no libzvbi name and no vbi_* symbol in any shared library"
+  ok "no libzvbi name and no libzvbi API identifier in any shared library"
 else
   cat "$TMP/zvbi.txt" | tee -a "$REPORT" | grep -E '^  FAIL' | cut -c1-260
   fail "libzvbi is linked (GPL-2 files pdc.c, packet-830.c, exp-vtx.c)"

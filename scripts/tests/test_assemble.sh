@@ -109,7 +109,12 @@ DESC="AAR not matching SHA256SUMS refused"; check test "$rc" = 1
 echo "== 4. zvbi check on the real v3.7.0-lgpl.1 AAR"
 python3 -I "$REPO/scripts/audit_licenses.py" symbols $(mkdir -p "$T/x" && unzip -q -o "$AAR" 'jni/*' -d "$T/x" && ls "$T"/x/jni/*/*.so) > "$T/zvbi.txt" 2>&1 && rc=0 || rc=$?
 DESC="symbols check refuses libvlc.so (libzvbi, vbi_*)"; check test "$rc" = 1
-DESC="the finding is reported as FAIL on libvlc.so"; check grep -q 'FAIL .*libvlc\.so: zvbi found' "$T/zvbi.txt"
+DESC="the finding is reported as FAIL on libvlc.so"; check grep -q 'FAIL .*libvlc\.so: zvbi API found' "$T/zvbi.txt"
+
+echo "== 5. no false positive on FFmpeg's MXF strings"
+printf 'vbi_smpte_436M\0vbi_vanc_smpte_436M\0' > "$T/mxf.so"
+python3 -I "$REPO/scripts/audit_licenses.py" symbols "$T/mxf.so" > "$T/mxf.txt" 2>&1 && rc=0 || rc=$?
+DESC="vbi_smpte_436M / vbi_vanc_smpte_436M accepted"; check test "$rc" = 0
 
 echo "== $pass passed, $failn failed"
 test "$failn" = 0

@@ -234,17 +234,15 @@ def obj_stem(name):
 
 
 def object_index(pkgdir):
-    """(stems by directory, all stems). A .libs directory counts for its parent."""
-    by_dir, all_stems = {}, set()
+    """Object files of a package: [(directory, stem, path)]. A .libs directory counts for its parent."""
+    objs = []
     for r, dirs, files in os.walk(pkgdir):
         dirs[:] = [d for d in dirs if d not in (".git", "autom4te.cache")]
         for f in files:
             if f.endswith(OBJ_EXT):
-                st = obj_stem(f)
                 d = os.path.dirname(r) if os.path.basename(r) == ".libs" else r
-                by_dir.setdefault(d, set()).add(st)
-                all_stems.add(st)
-    return by_dir, all_stems
+                objs.append((d, obj_stem(f), os.path.join(r, f)))
+    return objs
 
 
 def stem_match(stem, stems):
@@ -252,8 +250,41 @@ def stem_match(stem, stems):
     return any(s == stem or s.endswith("_" + stem) or s.endswith("-" + stem) for s in stems)
 
 
-def archive_stems(libdir):
-    stems = set()
+def ar_member_hashes(path):
+    """SHA-256 of the data of every member of an ar archive (GNU and BSD formats)."""
+    import hashlib
+    hashes = set()
+    with open(path, "rb") as f:
+        if f.read(8) != b"!<arch>\n":
+            return hashes
+        while True:
+            h = f.read(60)
+            if len(h) < 60:
+                break
+            name = h[:16].decode("ascii", "replace").strip()
+            size = int(h[48:58])
+            data_size = size
+            skip = 0
+            if name.startswith("#1/"):          # BSD: the name is stored in front of the data
+                skip = int(name[3:])
+            data = f.read(data_size)
+            if size % 2:
+                f.read(1)
+            if name in ("/", "//", "/SYM64/") or name.startswith("__.SYMDEF"):
+                continue
+            hashes.add(hashlib.sha256(data[skip:]).hexdigest())
+    return hashes
+
+
+def file_hash(path):
+    import hashlib
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def archive_evidence(libdir):
+    """(object stems, member hashes) of the static libraries installed in libdir."""
+    stems, hashes = set(), set()
     if not libdir or not os.path.isdir(libdir):
         return None
     for f in os.listdir(libdir):
@@ -262,7 +293,8 @@ def archive_stems(libdir):
             for m in out.stdout.split():
                 if m.endswith(OBJ_EXT):
                     stems.add(obj_stem(m))
-    return stems or None
+            hashes |= ar_member_hashes(os.path.join(libdir, f))
+    return (stems, hashes) if stems else None
 
 
 def load_exceptions(path):
@@ -295,18 +327,34 @@ def audit_contribs(build, exceptions_file, install=None):
     if not pkgs:
         print("ERROR: no package directory in %s" % build)
         return 2
-    lib_stems = archive_stems(os.path.join(install, "lib")) if install else None
+    evidence = archive_evidence(os.path.join(install, "lib")) if install else None
+    lib_stems, lib_hashes = evidence if evidence else (None, None)
     violations, excepted = [], []
     tools = 0
     notcompiled = 0
     print("Contrib packages scanned: %d (directory %s)" % (len(pkgs), build))
     print("Linked-library evidence: %s" % (
-        "%d object names in the installed static libraries" % len(lib_stems) if lib_stems
-        else "none, every compiled file is assumed linked"))
+        "%d object names, %d object contents (SHA-256) in the installed static libraries" % (len(lib_stems), len(lib_hashes))
+        if lib_stems else "none, every compiled file is assumed linked"))
     for pkg in pkgs:
         root = os.path.join(build, pkg)
-        by_dir, all_stems = object_index(root)
-        assume = not all_stems
+        objs = object_index(root)
+        assume = not objs
+        # In-tree build (objects next to the sources) or out-of-tree (cmake, meson).
+        src_dirs = set()
+        for r, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            if any(f.endswith(COMPILED_EXT) for f in files):
+                src_dirs.add(r)
+        in_tree = any(o[0] in src_dirs for o in objs)
+        by_dir = {}
+        for d, st, path in objs:
+            by_dir.setdefault(d, []).append((st, path))
+        all_objs = [(st, path) for _d, st, path in objs]
+        # Content comparison is used when at least one object of the package is found
+        # byte for byte in an installed library; otherwise (stripped or rewritten
+        # objects) the object name is the only evidence and the audit over-reports.
+        by_content = bool(lib_hashes) and any(file_hash(path) in lib_hashes for _st, path in all_objs)
         total = 0
         gpl_files = []
         for r, dirs, files in os.walk(root):
@@ -320,14 +368,24 @@ def audit_contribs(build, exceptions_file, install=None):
                     continue
                 stem = os.path.splitext(f)[0]
                 if assume:
+                    cands = None
                     compiled = True
-                elif r in by_dir:
-                    compiled = stem_match(stem, by_dir[r])
                 else:
-                    compiled = stem_match(stem, all_stems)
-                linked = compiled and (lib_stems is None or stem_match(stem, lib_stems))
+                    pool = by_dir.get(r, []) if in_tree else all_objs
+                    cands = [path for st, path in pool if st == stem or st.endswith("_" + stem) or st.endswith("-" + stem)]
+                    compiled = bool(cands)
+                if not compiled:
+                    linked = False
+                elif lib_stems is None:
+                    linked = True
+                elif by_content and cands is not None:
+                    linked = any(file_hash(c) in lib_hashes for c in cands)
+                else:
+                    linked = stem_match(stem, lib_stems)
                 gpl_files.append((os.path.relpath(p, root), compiled, linked))
-        note = "sources only, every file assumed compiled" if assume else "%d object names" % len(all_stems)
+        note = "sources only, every file assumed compiled" if assume else (
+            "%d object files, %s build, %s" % (len(objs), "in-tree" if in_tree else "out-of-tree",
+                                               "linked by object content" if by_content else "linked by object name"))
         if not gpl_files:
             print("  ok   %-34s %d source files, none GPL-only (%s)" % (pkg, total, note))
             continue
@@ -351,7 +409,7 @@ def audit_contribs(build, exceptions_file, install=None):
                 print("  EXCEPTION %-28s %s: GPL-only header, accepted: %s" % (pkg, rel, why))
             else:
                 violations.append((pkg, rel))
-                print("  FAIL %-34s %s: GPL-only header, compiled and linked" % (pkg, rel))
+                print("  FAIL %-34s %s: GPL-only header, compiled and linked (%s)" % (pkg, rel, note))
     unused = [i for i in range(len(rules)) if i not in used]
     if unused:
         print("  note %d of %d exception rule(s) matched nothing linked in this build" % (len(unused), len(rules)))
@@ -365,20 +423,32 @@ def audit_contribs(build, exceptions_file, install=None):
 
 
 # ----------------------------------------------------------------- symbols ----
-SYMBOL_RE = re.compile(rb"\bvbi_[a-z0-9_]+|\blibzvbi\b|\bzvbi[-_]0\.2\b", re.I)
+def zvbi_api():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "zvbi-api-symbols.txt")
+    with open(path) as f:
+        return {l.strip() for l in f if l.strip() and not l.startswith("#")}
+
+
+TOKEN_RE = re.compile(rb"[A-Za-z0-9_]+")
 
 
 def audit_symbols(files):
-    """libzvbi (GPL-2 files) must not be linked: no libzvbi name, no vbi_* symbol."""
+    """libzvbi (GPL-2 files) must not be linked: no identifier of its API (zvbi-api-symbols.txt,
+    taken from the zvbi headers) and no "libzvbi" name as a whole identifier in a shared library.
+    A bare "vbi_" prefix is not enough: FFmpeg's MXF demuxer has the strings
+    "vbi_smpte_436M" and "vbi_vanc_smpte_436M"."""
+    api = zvbi_api()
     bad = 0
     for path in files:
-        data = open(path, "rb").read()
-        hits = sorted(set(m.group(0).decode("ascii", "replace") for m in SYMBOL_RE.finditer(data)))
+        with open(path, "rb") as f:
+            data = f.read()
+        tokens = {m.group(0).decode("ascii") for m in TOKEN_RE.finditer(data) if len(m.group(0)) >= 7}
+        hits = sorted((tokens & api) | ({"libzvbi"} & tokens))
         if hits:
             bad += 1
-            print("  FAIL %s: zvbi found (%d names), e.g. %s" % (path, len(hits), ", ".join(hits[:6])))
+            print("  FAIL %s: zvbi API found (%d names), e.g. %s" % (path, len(hits), ", ".join(hits[:6])))
         else:
-            print("  ok   %s: no libzvbi name and no vbi_ symbol" % path)
+            print("  ok   %s: no libzvbi name and none of the %d zvbi API identifiers" % (path, len(api)))
     return 1 if bad else 0
 
 

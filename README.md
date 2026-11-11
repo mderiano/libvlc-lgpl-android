@@ -174,7 +174,9 @@ Run at the end of `build.sh`; exit status 1 fails the build. It checks:
    their sources downloaded and compiled in the run (no prebuilt contrib archive),
    and FFmpeg's own configure summary saying "License: LGPL version 2.1 or later".
 7. a list of the linked contrib libraries and versions.
-8. **libzvbi** (A2): no `libzvbi` name and no `vbi_*` symbol in any `.so` (the check
+8. **libzvbi** (A2): none of the 413 identifiers of libzvbi's API (`scripts/zvbi-api-symbols.txt`, taken from
+   its headers) and no `libzvbi` name in any `.so`; a bare `vbi_` prefix is not tested: FFmpeg's
+   MXF demuxer has the strings `vbi_smpte_436M` and `vbi_vanc_smpte_436M` (the check
    that `v3.7.0-lgpl.1` lacked; run on that release's AAR it fails, see below).
 9. **third-party sources** (H): for every contrib package that was built (not only
    the ones the GPL switches know), every source file whose header names the GNU
@@ -190,47 +192,18 @@ Run at the end of `build.sh`; exit status 1 fails the build. It checks:
 
 ### Audit exceptions (`gpl-exceptions.tsv`)
 
-A GPL-only file that is compiled and linked is refused unless `gpl-exceptions.tsv`
-accepts it (package glob, path regex, written justification; the audit prints
-`EXCEPTION` and the justification). The list is short and every line is a program,
-test or tool that sits in a library's source tree but is never part of the library:
-
-* any package: `tests/`, `examples/`, `doc/`, `demos/`, `devel/` directories;
-* libpng `contrib/` (sample viewers); FLAC `src/{flac,metaflac,utils,test_*,share/grabbag,share/utf8}`
-  (command-line programs and their helper libraries; libFLAC is `src/libFLAC`);
-* GnuTLS `src/` (the `gnutls-cli`, `certtool` tools and their gnulib) and `extra/`
-  (libgnutls-openssl, GPL by design, built only with `--enable-openssl-compatibility`);
-* libtasn1 `src/` and `gl/` (tools and their gnulib); libiconv `src/`, `srclib/`, `tools/`,
-  `gnulib-local/` (the `iconv` program); libgcrypt `src/getrandom.c`, `src/gcryptrnd.c`
-  (random daemon, off); libnfs `utils/`; fribidi `bin/`; nettle `twofishdata.c` (generator);
-  libtheora `win32/`.
-
-The scan of the sources of the contribs of `v3.7.0-lgpl.1` (`contrib-tarballs-*.tar`, which
-has no object files, so everything counts as compiled) found exactly these categories,
-the GPL-only FFmpeg filters and libpostproc that `--disable-gpl` does not compile (they
-fail the check only when no build evidence exists), and libzvbi's `pdc.c`, `packet-830.c`,
-`exp-vtx.c`, which the 0003 patch removes. GMP, Nettle, GnuTLS, libgcrypt, FLAC
-etc. are LGPL or dual-licensed for what is archived in their libraries.
-
-### Audit false positives found and fixed
-
-The first run of 2026-11-10 failed two checks, both false positives, with the
-build itself clean (FFmpeg 4.4.5 "License: LGPL version 2.1 or later", 255 modules
-without a GPL header, no GPL contrib):
-
-* `x264 - core`: the strings `x264 - core %d` and `x264 - core 0000` come from
-  FFmpeg's H.264 decoder (`libavcodec/h264_sei.c`, `sscanf(..., "x264 - core %d")`),
-  which recognises streams produced by x264. It is not x264 code. The check now
-  looks for the encoder banner (`x264.html`, `Copyleft 2003`, `x264 - core N rN`).
-* "You may redistribute it under the terms of the GNU General Public License":
-  `LICENSE_MSG` of `include/vlc_common.h`, the startup text of libvlccore, which is
-  LGPL. A module's license is exported as "Licensed under the terms of the GNU ..."
-  (`VLC_LICENSE_GPL_2_PLUS` in `vlc_plugin.h`); the check, and the filter that drops
-  GPL modules from the build, now match that string only. The one module that the
-  filter drops, `stream_out_cycle`, is genuinely GPL.
-
-The same run also showed that the pattern "GPL version 2 or 3 or later" never ran
-(its `|` clashed with the pattern separator); it is fixed.
+The list is empty on purpose. Section H classifies each GPL-only source file from facts
+in the build tree: *not compiled* (no object file: tests, tools, FFmpeg's GPL filters and
+libpostproc that `--disable-gpl` leaves out), *compiled but in no installed library*
+(programs and tests: the object's SHA-256 is not that of any member of the installed
+`.a` files) or *compiled and linked* (refused). Only an entry in `gpl-exceptions.tsv`
+(package glob, path regex, justification) accepts a linked file, and each entry needs a
+verifiable fact such as a dual license read in the file. History: the first multi-ABI run
+(43012012675) refused six gettext files because the first version matched objects to
+libraries by file name (`gettext.c`, `options.c`, `plural-exp.c`, ... collide with
+libintl's objects); the content comparison replaced it. Without object files (the
+corresponding-source tarballs) every source counts as compiled and linked: the check
+can only over-report there.
 
 A clean run is no proof of absence: the checks read symbol names, license strings and
 headers.
