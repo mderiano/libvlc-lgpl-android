@@ -17,20 +17,33 @@
 #     postproc, a52, mad, dca, faad, mpeg2, samplerate, ...).
 #  E. AAR content: no Lua assets; Java and JNI sources of libvlcjni: no GPL-only file.
 #  F. report of what is linked (contrib libraries and versions), for the notice.
+#  A2. no libzvbi (GPL-2 files pdc.c, packet-830.c, exp-vtx.c): no "libzvbi" name and
+#     no vbi_* symbol in any .so (seen in v3.7.0-lgpl.1, which linked libzvbi 0.2.35).
+#  H. every contrib that was built: no source file with a GPL-only header that is
+#     compiled and archived in an installed static library (scripts/audit_licenses.py
+#     contribs), except the written, justified list gpl-exceptions.tsv (README).
+#
+# --aar-only: only the checks that need nothing but the AAR (A, A2, Lua assets,
+# data licenses); used for the assembled multi-ABI AAR and for tests on a release.
 set -uo pipefail
 
-WORK=""; AAR=""; ABI=arm64-v8a; OUT="$PWD"
+WORK=""; AAR=""; ABI=arm64-v8a; OUT="$PWD"; AAR_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --work) WORK="$2"; shift ;;
     --aar) AAR="$2"; shift ;;
     --abi) ABI="$2"; shift ;;
     --out) OUT="$2"; shift ;;
+    --aar-only) AAR_ONLY=1 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
 done
-[ -d "$WORK/libvlcjni/vlc" ] && [ -f "$AAR" ] || { echo "usage: $0 --work WORKDIR --aar FILE.aar [--abi ABI] [--out DIR]" >&2; exit 2; }
+if [ "$AAR_ONLY" = 1 ]; then
+  [ -f "$AAR" ] || { echo "usage: $0 --aar-only --aar FILE.aar [--out DIR]" >&2; exit 2; }
+else
+  [ -d "$WORK/libvlcjni/vlc" ] && [ -f "$AAR" ] || { echo "usage: $0 --work WORKDIR --aar FILE.aar [--abi ABI] [--out DIR] | --aar-only --aar FILE.aar" >&2; exit 2; }
+fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 case "$ABI" in
@@ -41,7 +54,8 @@ case "$ABI" in
 esac
 VLC="$WORK/libvlcjni/vlc"
 BUILD="$VLC/build-android-$TUPLE"
-CONTRIB="$VLC/contrib/$TUPLE"
+CONTRIB="$VLC/contrib/$TUPLE"                       # install prefix (lib/, lib/pkgconfig/)
+CONTRIB_BUILD="$VLC/contrib/contrib-android-$TUPLE" # unpacked and built sources
 REPORT="$OUT/LICENSE-AUDIT.txt"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -104,6 +118,19 @@ for so in $SOS; do
   done
 done
 
+# ----------------------------------------------------------------- A2 ----
+section "A2. libzvbi (GPL-2 files) is not linked"
+# libzvbi 0.2.35: pdc.c, packet-830.c and exp-vtx.c are GPL-2. --disable-gpl does not
+# remove it; the recipe disables the contrib and the VLC zvbi module (patch 0003).
+if python3 -I "$HERE/scripts/audit_licenses.py" symbols $SOS > "$TMP/zvbi.txt" 2>&1; then
+  cat "$TMP/zvbi.txt" >> "$REPORT"
+  ok "no libzvbi name and no vbi_* symbol in any shared library"
+else
+  cat "$TMP/zvbi.txt" | tee -a "$REPORT" | grep -E '^  FAIL' | cut -c1-260
+  fail "libzvbi is linked (GPL-2 files pdc.c, packet-830.c, exp-vtx.c)"
+fi
+
+if [ "$AAR_ONLY" = 0 ]; then
 # ------------------------------------------------------------------ B ----
 section "B. modules linked in libvlc.so (static module list), license and sources"
 if python3 -I "$HERE/scripts/audit_licenses.py" modules --vlc "$VLC" --build "$BUILD" > "$TMP/modules.txt" 2>&1; then
@@ -124,7 +151,6 @@ if [ -n "$dropped" ]; then
   say "modules dropped by the build (GPL license string):"
   printf '%s\n' "$dropped" | sed 's/^.*dropping GPL module /    /' | tee -a "$REPORT" >/dev/null
 fi
-
 # ------------------------------------------------------------------ C ----
 section "C. FFmpeg configuration"
 FF_SCANNED=0
@@ -156,23 +182,26 @@ done
 
 # ------------------------------------------------------------------ D ----
 section "D. contrib libraries"
-GPL_LIBS="x264 x265 x262 dvdread dvdnav dvdcss postproc a52 dca faad mad mpeg2 samplerate sidplay2 aribb24 vncclient"
+GPL_LIBS="x264 x265 x262 dvdread dvdnav dvdcss postproc a52 dca faad mad mpeg2 samplerate sidplay2 aribb24 vncclient zvbi"
 for l in $GPL_LIBS; do
   found=$(ls "$CONTRIB"/lib/lib${l}.a "$CONTRIB"/lib/lib${l}*.so* 2>/dev/null | head -n 1)
   if [ -n "$found" ]; then fail "GPL contrib built: $found"; else ok "no lib$l"; fi
 done
+fi # AAR_ONLY (B, C, D need the build tree)
 
 # ------------------------------------------------------------------ E ----
 section "E. AAR content and libvlcjni sources"
 if unzip -l "$AAR" | grep -q 'assets/lua/'; then fail "AAR ships Lua scripts (GPL)"; else ok "no Lua scripts in the AAR"; fi
 say "AAR entries (top level): $(unzip -Z1 "$AAR" | sed 's#/.*##' | sort | uniq -c | tr -s ' ' | tr '\n' ',')"
 unzip -Z1 "$AAR" | grep -E '^(assets|jni)/' | sed 's/^/    /' | tee -a "$REPORT" >/dev/null
-if python3 -I "$HERE/scripts/audit_licenses.py" tree "$WORK/libvlcjni/libvlc/src" "$WORK/libvlcjni/libvlc/jni" > "$TMP/tree.txt" 2>&1; then
-  ok "libvlcjni Java/JNI sources: no GPL-only file"
-else
-  fail "libvlcjni sources contain GPL-only file(s)"
+if [ "$AAR_ONLY" = 0 ]; then
+  if python3 -I "$HERE/scripts/audit_licenses.py" tree "$WORK/libvlcjni/libvlc/src" "$WORK/libvlcjni/libvlc/jni" > "$TMP/tree.txt" 2>&1; then
+    ok "libvlcjni Java/JNI sources: no GPL-only file"
+  else
+    fail "libvlcjni sources contain GPL-only file(s)"
+  fi
+  cat "$TMP/tree.txt" >> "$REPORT"
 fi
-cat "$TMP/tree.txt" >> "$REPORT"
 # The SOFA files carry their own license in their attributes (HDF5 strings, stored
 # as plain text): read with Python, not strings|grep (pipefail/SIGPIPE, tool differences).
 check_sofa() {
@@ -187,6 +216,7 @@ for sofa in "$TMP"/aar/assets/hrtfs/*; do
   [ -f "$sofa" ] && check_sofa "$sofa"
 done
 
+if [ "$AAR_ONLY" = 0 ]; then
 # ------------------------------------------------------------------ F ----
 section "F. contrib libraries linked (pkg-config name and version)"
 if [ -d "$CONTRIB/lib/pkgconfig" ]; then
@@ -214,6 +244,27 @@ if [ -f "$LOG" ]; then
 else
   warn "build log not found at $LOG"
 fi
+
+section "H. GPL-only source files of the contribs (compiled and linked)"
+# Every package of VLC's contrib build (not only the ones the GPL switches know): a source
+# whose header is GPL without Lesser/exception, compiled and archived in an installed
+# library, refuses the build. What is found is listed here, including accepted exceptions
+# (gpl-exceptions.tsv, README "Audit exceptions") and GPL files that were not compiled.
+if python3 -I "$HERE/scripts/audit_licenses.py" contribs --contrib-build "$CONTRIB_BUILD" \
+     --contrib-install "$CONTRIB" --exceptions "$HERE/gpl-exceptions.tsv" > "$TMP/contribs.txt" 2>&1; then
+  rch=0
+else
+  rch=$?
+fi
+cat "$TMP/contribs.txt" >> "$REPORT"
+grep -E '^(Contrib packages|Linked-library|SUMMARY|ERROR)' "$TMP/contribs.txt"
+grep -E '^  (FAIL|EXCEPTION|info)' "$TMP/contribs.txt" | cut -c1-240 | head -n 40
+case "$rch" in
+  0) ok "no GPL-only file compiled and linked from the contribs" ;;
+  1) fail "GPL-only file(s) compiled and linked from a contrib library (see section H above)" ;;
+  *) fail "contrib source audit could not run (exit $rch)" ;;
+esac
+fi # AAR_ONLY (F, G, H need the build tree)
 
 section "RESULT"
 if [ "$FAILS" -eq 0 ]; then

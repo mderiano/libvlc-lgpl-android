@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: build <build@localhost>
+Date: Wed, 11 Nov 2026 12:00:00 +0100
+Subject: [PATCH] build: remove zvbi (libzvbi 0.2.35 has GPL-2 files)
+
+libzvbi's pdc.c, packet-830.c and exp-vtx.c are GPL-2 only. compile-libvlc.sh
+enables the zvbi contrib and the zvbi module explicitly, and --disable-gpl does
+not remove it.
+
+- contrib bootstrap and VLC configure: --enable-zvbi -> --disable-zvbi (VLC's
+  own LGPL telx module is then built instead)
+- blacklist the zvbi module
+---
+ buildsystem/compile-libvlc.sh | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/buildsystem/compile-libvlc.sh b/buildsystem/compile-libvlc.sh
+index f666ee6..7749946 100755
+--- a/buildsystem/compile-libvlc.sh
++++ b/buildsystem/compile-libvlc.sh
+@@ -307,7 +307,7 @@ VLC_CONTRIB_ARGS="\
+     --disable-sdl \
+     --disable-SDL_image \
+     --disable-fontconfig \
+-    --enable-zvbi \
++    --disable-zvbi \
+     --disable-kate \
+     --disable-caca \
+     --disable-mpcdec \
+@@ -379,7 +379,7 @@ VLC_CONFIGURE_ARGS="\
+     --enable-mpg123 \
+     --disable-dca \
+     --disable-sdl-image \
+-    --enable-zvbi \
++    --disable-zvbi \
+     --disable-fluidsynth \
+     --enable-fluidlite \
+     --disable-jack \
+@@ -470,6 +470,7 @@ VLC_MODULE_BLACKLIST="
+     dolby_surround_decoder
+     stream_out_rtp
+     vod_rtsp
++    zvbi
+     access_realrtsp
+     file_logger
+     syslog

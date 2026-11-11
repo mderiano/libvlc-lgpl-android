@@ -1,0 +1,17 @@
+# Accepted GPL-only files of the contribs (check-no-gpl.sh, section H).
+# PACKAGE-GLOB <TAB> PATH-REGEX (relative to the package directory) <TAB> justification
+# The package directory is the one of VLC's contrib build (contrib-android-<tuple>/<name>/).
+# An entry only matters for a file that is compiled AND a member of an installed static
+# library (scripts/audit_licenses.py contribs); keep this list short and justified.
+*	(^|/)(tests?|examples?|doc|docs|demos?|devel)/	Test programs, examples, documentation tools and demos: built only by "make check" or on request, never archived in an installed library.
+*png*	^([^/]+/)?contrib/	libpng's contrib/ (gregbook example viewers): sample programs, not part of libpng.
+flac*	^([^/]+/)?src/(flac|metaflac|utils|test_[A-Za-z_+]+|share/(grabbag|utf8))/	FLAC command-line programs, their tests and helper convenience libraries (libgrabbag, utf8); libFLAC itself is src/libFLAC (BSD).
+gnutls*	^([^/]+/)?src/	GnuTLS command-line tools (gnutls-cli, certtool, ...) and the gnulib code they use; libgnutls is lib/ (LGPL-2.1+).
+gnutls*	^([^/]+/)?extra/	libgnutls-openssl (GPL by design), built only with --enable-openssl-compatibility, off in the contrib.
+*tasn1*	^([^/]+/)?(src|gl)/	asn1Parser/asn1Coding/asn1Decoding tools and the gnulib they use; libtasn1 itself is lib/ (LGPL).
+*iconv*	^([^/]+/)?(src|srclib|tools|gnulib-local)/	The iconv program and its gnulib; libiconv.a is lib/ and libcharset/ (LGPL).
+*gcrypt*	^([^/]+/)?src/(getrandom|gcryptrnd)\.c$	Random-number daemon helpers (--enable-random-daemon, off); not part of libgcrypt.
+*nfs*	(^|/)utils/	nfs-ls, nfs-cat, ... command-line utilities, not part of libnfs.
+fribidi*	^([^/]+/)?bin/	fribidi command-line program (getopt copy); the library is lib/ (LGPL-2.1+).
+nettle*	^([^/]+/)?twofishdata\.c$	Generator program run by the developers to produce the twofish tables; not compiled into libnettle.
+*theora*	^([^/]+/)?win32/	Windows-only experimental transcoder; not built for Android.

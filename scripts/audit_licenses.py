@@ -3,6 +3,9 @@
 
   audit_licenses.py modules --vlc DIR --build DIR     modules really linked in libvlc.so
   audit_licenses.py tree DIR [DIR...]                 source headers of a directory tree
+  audit_licenses.py contribs --contrib-build DIR [--contrib-install DIR] [--exceptions FILE]
+                                                      GPL-only files of the contribs (third-party libraries)
+  audit_licenses.py symbols FILE.so [FILE.so...]      libzvbi / vbi_ symbols in shared libraries
 
 A source file is "GPL-only" when its header names the GNU General Public License
 and neither the Lesser nor the Library General Public License. A module is
@@ -189,6 +192,196 @@ def audit_data_license(path):
     return 1
 
 
+# ---------------------------------------------------------------- contribs ----
+# Third-party libraries ("contribs"): every package that was built is scanned, not
+# only the ones the GPL switches know about. A source file refuses the build when
+#   * its header (first 4000 bytes) names the GNU General Public License,
+#     without "Lesser"/"Library" General Public License, without a linking
+#     exception ("special exception", "permission to link", ...) and without an
+#     alternative permissive license (BSD/MIT text: dual-licensed files), and
+#   * it was compiled: an object file with the same stem exists next to it (in-tree
+#     builds) or anywhere in the package tree (out-of-tree builds); and
+#   * it is linked: an object with the same stem is a member of a static library
+#     installed in the contrib prefix (`ar t lib/*.a`). A compiled file that is in
+#     no installed library is a tool or a test program, reported but not refused.
+# Where evidence is missing (no object file in the package tree, as in the
+# corresponding-source tarballs; no --contrib-install) the file is assumed compiled
+# (resp. linked): the audit can only over-report. Files named in the exceptions
+# file (README, "Audit exceptions") do not refuse the build and are reported as
+# EXCEPTION with their justification.
+
+COMPILED_EXT = (".c", ".cc", ".cpp", ".cxx", ".C", ".S", ".s", ".asm", ".m", ".mm")
+OBJ_EXT = (".o", ".lo", ".obj")
+EXCEPTION_RE = re.compile(
+    rb"special exception|linking exception|exception to the GNU|permission to link|"
+    rb"you may link|additional permission|may be linked with|"
+    rb"redistribution and use in source and binary forms|BSD[- ]style|"
+    rb"(?:BSD|MIT|Apache|zlib|Boost|ISC)[- ]?(?:style )?licen[sc]e", re.I)
+SKIP_DIRS = {".git", ".deps", ".libs", "autom4te.cache"}
+
+
+def gpl_only_contrib(path):
+    h = header(path)
+    return bool(GPL_RE.search(h)) and not LESSER_RE.search(h) and not EXCEPTION_RE.search(h)
+
+
+def obj_stem(name):
+    stem = os.path.splitext(name)[0]
+    for e in COMPILED_EXT:
+        if stem.endswith(e):
+            return stem[: -len(e)]
+    return stem
+
+
+def object_index(pkgdir):
+    """(stems by directory, all stems). A .libs directory counts for its parent."""
+    by_dir, all_stems = {}, set()
+    for r, dirs, files in os.walk(pkgdir):
+        dirs[:] = [d for d in dirs if d not in (".git", "autom4te.cache")]
+        for f in files:
+            if f.endswith(OBJ_EXT):
+                st = obj_stem(f)
+                d = os.path.dirname(r) if os.path.basename(r) == ".libs" else r
+                by_dir.setdefault(d, set()).add(st)
+                all_stems.add(st)
+    return by_dir, all_stems
+
+
+def stem_match(stem, stems):
+    # libtool "libfoo_la-bar", automake "foo-bar", meson "dir_bar" prefixes
+    return any(s == stem or s.endswith("_" + stem) or s.endswith("-" + stem) for s in stems)
+
+
+def archive_stems(libdir):
+    stems = set()
+    if not libdir or not os.path.isdir(libdir):
+        return None
+    for f in os.listdir(libdir):
+        if f.endswith(".a"):
+            out = subprocess.run(["ar", "t", os.path.join(libdir, f)], capture_output=True, text=True)
+            for m in out.stdout.split():
+                if m.endswith(OBJ_EXT):
+                    stems.add(obj_stem(m))
+    return stems or None
+
+
+def load_exceptions(path):
+    """Lines: PACKAGE-GLOB <TAB> PATH-REGEX <TAB> justification (# comments)."""
+    rules = []
+    if not path:
+        return rules
+    for n, line in enumerate(open(path, encoding="utf-8"), 1):
+        line = line.rstrip("\n")
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3 or not parts[2].strip():
+            print("ERROR: %s:%d needs PACKAGE<TAB>PATH-REGEX<TAB>justification" % (path, n))
+            raise SystemExit(2)
+        rules.append((parts[0].strip(), re.compile(parts[1].strip()), parts[2].strip()))
+    return rules
+
+
+def audit_contribs(build, exceptions_file, install=None):
+    import fnmatch
+    build = os.path.realpath(build)
+    if not os.path.isdir(build):
+        print("ERROR: contrib build directory %s not found" % build)
+        return 2
+    rules = load_exceptions(exceptions_file)
+    used = set()
+    pkgs = sorted(d for d in os.listdir(build)
+                  if os.path.isdir(os.path.join(build, d)) and not d.startswith("."))
+    if not pkgs:
+        print("ERROR: no package directory in %s" % build)
+        return 2
+    lib_stems = archive_stems(os.path.join(install, "lib")) if install else None
+    violations, excepted = [], []
+    tools = 0
+    notcompiled = 0
+    print("Contrib packages scanned: %d (directory %s)" % (len(pkgs), build))
+    print("Linked-library evidence: %s" % (
+        "%d object names in the installed static libraries" % len(lib_stems) if lib_stems
+        else "none, every compiled file is assumed linked"))
+    for pkg in pkgs:
+        root = os.path.join(build, pkg)
+        by_dir, all_stems = object_index(root)
+        assume = not all_stems
+        total = 0
+        gpl_files = []
+        for r, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            for f in files:
+                if not f.endswith(COMPILED_EXT):
+                    continue
+                total += 1
+                p = os.path.join(r, f)
+                if os.path.islink(p) or not gpl_only_contrib(p):
+                    continue
+                stem = os.path.splitext(f)[0]
+                if assume:
+                    compiled = True
+                elif r in by_dir:
+                    compiled = stem_match(stem, by_dir[r])
+                else:
+                    compiled = stem_match(stem, all_stems)
+                linked = compiled and (lib_stems is None or stem_match(stem, lib_stems))
+                gpl_files.append((os.path.relpath(p, root), compiled, linked))
+        note = "sources only, every file assumed compiled" if assume else "%d object names" % len(all_stems)
+        if not gpl_files:
+            print("  ok   %-34s %d source files, none GPL-only (%s)" % (pkg, total, note))
+            continue
+        for rel, compiled, linked in gpl_files:
+            if not compiled:
+                notcompiled += 1
+                print("  info %-34s %s: GPL-only header, no object file (not compiled)" % (pkg, rel))
+                continue
+            if not linked:
+                tools += 1
+                print("  info %-34s %s: GPL-only header, compiled but in no installed library (tool/test)" % (pkg, rel))
+                continue
+            why = None
+            for i, (pg, rx, just) in enumerate(rules):
+                if fnmatch.fnmatch(pkg, pg) and rx.search(rel):
+                    why = just
+                    used.add(i)
+                    break
+            if why:
+                excepted.append((pkg, rel, why))
+                print("  EXCEPTION %-28s %s: GPL-only header, accepted: %s" % (pkg, rel, why))
+            else:
+                violations.append((pkg, rel))
+                print("  FAIL %-34s %s: GPL-only header, compiled and linked" % (pkg, rel))
+    unused = [i for i in range(len(rules)) if i not in used]
+    if unused:
+        print("  note %d of %d exception rule(s) matched nothing linked in this build" % (len(unused), len(rules)))
+    print("SUMMARY: %d package(s); %d GPL-only file(s) compiled and linked and refused, %d accepted by exception, "
+          "%d compiled but in no library, %d not compiled" % (len(pkgs), len(violations), len(excepted), tools, notcompiled))
+    if violations:
+        print("RESULT: %d GPL-only compiled file(s) linked from the contribs" % len(violations))
+        return 1
+    print("RESULT: no GPL-only file linked from the contribs (%d accepted by exception)" % len(excepted))
+    return 0
+
+
+# ----------------------------------------------------------------- symbols ----
+SYMBOL_RE = re.compile(rb"\bvbi_[a-z0-9_]+|\blibzvbi\b|\bzvbi[-_]0\.2\b", re.I)
+
+
+def audit_symbols(files):
+    """libzvbi (GPL-2 files) must not be linked: no libzvbi name, no vbi_* symbol."""
+    bad = 0
+    for path in files:
+        data = open(path, "rb").read()
+        hits = sorted(set(m.group(0).decode("ascii", "replace") for m in SYMBOL_RE.finditer(data)))
+        if hits:
+            bad += 1
+            print("  FAIL %s: zvbi found (%d names), e.g. %s" % (path, len(hits), ", ".join(hits[:6])))
+        else:
+            print("  ok   %s: no libzvbi name and no vbi_ symbol" % path)
+    return 1 if bad else 0
+
+
 def main(argv):
     if len(argv) == 3 and argv[1] == "datalicense":
         return audit_data_license(argv[2])
@@ -198,6 +391,14 @@ def main(argv):
             print(__doc__)
             return 2
         return audit_modules(opts["--vlc"], opts["--build"])
+    if len(argv) >= 2 and argv[1] == "contribs":
+        opts = dict(zip(argv[2::2], argv[3::2]))
+        if "--contrib-build" not in opts:
+            print(__doc__)
+            return 2
+        return audit_contribs(opts["--contrib-build"], opts.get("--exceptions"), opts.get("--contrib-install"))
+    if len(argv) >= 3 and argv[1] == "symbols":
+        return audit_symbols(argv[2:])
     if len(argv) >= 3 and argv[1] == "tree":
         return audit_tree(argv[2:])
     print(__doc__)
