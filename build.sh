@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds LibVLC for Android (the "libvlc-all" AAR) without any GPL component.
 #
-#   ./build.sh [--abi arm64-v8a|armeabi-v7a|x86_64] [--license l|a]
+#   ./build.sh [--abi arm64-v8a|armeabi-v7a|x86|x86_64] [--license l|a]
 #              [--work DIR] [--out DIR] [--prepare-only] [--no-check]
 #
 # It clones VideoLAN's sources at the pinned commits (shallow, by commit id),
@@ -19,7 +19,7 @@
 #
 # It is meant to run in VideoLAN's own build image (Debian, Android SDK, NDK,
 # Gradle, JDK 17), see .github/workflows/build.yml and README.md. The NDK is
-# taken from $ANDROID_NDK (64-bit ABIs: NDK 27 or 28; armeabi-v7a: NDK 21).
+# taken from $ANDROID_NDK (64-bit ABIs: NDK 27 or 28; armeabi-v7a and x86: NDK 21).
 # Building VLC needs ~25 GB of disk and 1 to 2 hours; do not run it on a laptop.
 set -euo pipefail
 umask 000
@@ -60,8 +60,9 @@ done
 case "$ABI" in
   arm64-v8a)   TUPLE=aarch64-linux-android ;;
   armeabi-v7a) TUPLE=arm-linux-androideabi ;;
+  x86)         TUPLE=i686-linux-android ;;
   x86_64)      TUPLE=x86_64-linux-android ;;
-  *) echo "unsupported ABI: $ABI (arm64-v8a, armeabi-v7a, x86_64)" >&2; exit 2 ;;
+  *) echo "unsupported ABI: $ABI (arm64-v8a, armeabi-v7a, x86, x86_64)" >&2; exit 2 ;;
 esac
 case "$LICENSE_FLAG" in
   l|a) ;;

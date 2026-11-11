@@ -15,15 +15,15 @@ This project is not affiliated with VideoLAN.
 
 ## What it produces
 
-**One release = one AAR for the three ABIs** (`arm64-v8a`, `armeabi-v7a`,
-`x86_64`), built in parallel, each audited, then merged by
+**One release = one AAR for the four ABIs** (`arm64-v8a`, `armeabi-v7a`,
+`x86`, `x86_64`), built in parallel, each audited, then merged by
 `scripts/assemble_release.py` (see "Building"). The release holds:
 
 | File | Content |
 |---|---|
 | `libvlc-lgpl-3.7.0-l.aar` | the library: one `classes.jar`, `jni/<abi>/{libvlc,libvlcjni,libc++_shared}.so` for each ABI |
 | `SHA256SUMS` | SHA-256 of every release file and of every `.so` inside the AAR |
-| `BUILD-INFO.txt` | the three builds grouped: pinned commits, patch hashes, exact options, NDK, per-ABI audit verdicts |
+| `BUILD-INFO.txt` | the four builds grouped: pinned commits, patch hashes, exact options, NDK, per-ABI audit verdicts |
 | `LICENSE-AUDIT-<abi>-l.txt` | audit of each ABI (all checks, with the build tree) |
 | `LICENSE-AUDIT-aar-l.txt` | audit of the assembled AAR (`check-no-gpl.sh --aar-only`) |
 | `vlc-*-patched-<abi>.tar.xz`, `libvlcjni-*-patched-<abi>.tar.xz`, `contrib-tarballs-<abi>.tar`, `CONTRIB-SOURCES-<abi>.sha256` | corresponding source of each build |
@@ -47,7 +47,7 @@ produces, for that ABI and one license flag:
 | libvlc | **3.7.0**, the version of `libvlc-all:3.7.0` |
 | libvlcjni | `7cd0c151da4162aa3052fb6949ddab1436d8fafb` (branch `libvlcjni-3x`, 2026-03-12) |
 | VLC | `3458be162f476ff64b639140b684efa1143ddeea` (branch `3.0.x`, 2026-02-22), libvlcjni's `VLC_TESTED_HASH` |
-| Build image | `registry.videolan.org/vlc-debian-android:20250626142950` (NDK 28b, Gradle 8.13) for 64-bit ABIs, `registry.videolan.org/vlc-debian-android-3.0:20250626142950` (NDK 21e) for `armeabi-v7a`: the images libvlcjni's own `.gitlab-ci.yml` uses at that commit. Both are public. |
+| Build image | `registry.videolan.org/vlc-debian-android:20250626142950` (NDK 28b, Gradle 8.13) for 64-bit ABIs, `registry.videolan.org/vlc-debian-android-3.0:20250626142950` (NDK 21e) for the 32-bit ABIs `armeabi-v7a` and `x86`: the images libvlcjni's own `buildsystem/gitlab/.gitlab-ci.yml` uses at that commit (the default image for `build-libvlc-armv7` and `build-libvlc-x86`, `vlc-debian-android` for arm64 and x86_64). Both are public. |
 
 ## How the GPL parts are removed
 
@@ -89,6 +89,21 @@ still contains GPL modules, which the patches of this repository remove:
 Everything else is VideoLAN's sources unchanged (including libvlcjni's own 20
 patches to VLC).
 
+### The `x86` ABI (32-bit Intel, Android TV / emulators)
+
+Added for the Android TV emulators of 32-bit x86 (API 34), which the official `libvlc-all`
+served. Differences, all from VideoLAN's own scripts at the pinned commits, none from this recipe:
+`compile-libvlc.sh -a x86` uses the triplet `i686-linux-android`, API level 17 and the NDK 21
+check (32-bit), hence the `vlc-debian-android-3.0` image like `armeabi-v7a`; the contrib prefix is
+`contrib/i686-linux-android`. VLC's FFmpeg recipe (`contrib/src/ffmpeg/rules.mak`) adds
+`--disable-mmx --disable-mmxext --disable-inline-asm` for `x86` and `x86_64` ("broken text
+relocations"; x86 assembly files such as `x86/*.asm` are still built, and `--disable-gpl` applies as
+for the other ABIs). The yadif patch removes x86 inline assembly together with the GPL algorithm and
+the patches contain no architecture-specific line otherwise. FFmpeg and the other contribs of this
+ABI are audited like the others (check H reads `contrib-android-i686-linux-android`). Never built
+here before the first run that includes it: if a contrib fails to build for `x86`, the whole
+`abi = all` run fails; use `abi = x86` for a trial.
+
 ### What you lose compared with the official binary
 
 DVD playback (libdvdread/libdvdnav; Blu-ray through libbluray stays), Lua
@@ -127,10 +142,10 @@ On GitHub: **Actions, "Build libvlc (LGPL)", Run workflow**, choose `abi` and
 `license`.
 
 * `abi = all` (default): a matrix builds `arm64-v8a`, `armeabi-v7a` (image
-  `vlc-debian-android-3.0`, NDK 21e) and `x86_64`, each with its own audit
-  (1 to 2 hours each, in parallel). Then the `assemble` job downloads the three
+  `vlc-debian-android-3.0`, NDK 21e), `x86` (same image) and `x86_64`, each with its own audit
+  (1 to 2 hours each, in parallel). Then the `assemble` job downloads the four
   builds and runs `scripts/assemble_release.py`: it refuses an ABI whose audit is not
-  PASS or whose AAR does not match its `SHA256SUMS.txt`; it checks that the three
+  PASS or whose AAR does not match its `SHA256SUMS.txt`; it checks that the four
   `classes.jar` are equivalent (same entry names, sizes and CRC-32; otherwise the
   assembly fails); it writes the single AAR, `SHA256SUMS`, the grouped `BUILD-INFO.txt`,
   the audits and the sources, audits the assembled AAR again, and, if all passed and
@@ -254,6 +269,6 @@ dependencies {
 
 It exposes the same `org.videolan.libvlc` API as `libvlc-all:3.7.0` minus
 `RendererDiscoverer`. Remove `org.videolan.android:libvlc-all` from the
-dependencies, otherwise both libraries collide. The release AAR holds the three
+dependencies, otherwise both libraries collide. The release AAR holds the four
 ABIs; Gradle/AGP keeps the ones you ship (`ndk.abiFilters`). Do not combine it with
 the single-ABI AARs of a trial: they would collide on `classes.jar`.

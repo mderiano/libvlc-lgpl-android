@@ -6,7 +6,7 @@
 #
 # DIR holds a release of this recipe: libvlc-lgpl-*-arm64-v8a-l.aar and the files
 # of `gh release download v3.7.0-lgpl.1 -R mderiano/libvlc-lgpl-android`. The AAR is
-# duplicated under two fake ABI names (jni/arm64-v8a renamed). Expected:
+# duplicated under three fake ABI names (jni/arm64-v8a renamed). Expected:
 #   1. assembly of three "ABIs" works (--no-audit) and the merged AAR has 3 jni/ dirs;
 #   2. without --no-audit, the audit of the assembled AAR REFUSES it when the AAR still
 #      links libzvbi (v3.7.0-lgpl.1 does);
@@ -48,17 +48,17 @@ for n in ("vlc-3458be16-patched.tar.xz", "libvlcjni-7cd0c151-patched.tar.xz", "c
     open(os.path.join(d, "source", n), "wb").write(b"x")
 PY
 }
-fake_abi arm64-v8a; fake_abi armeabi-v7a; fake_abi x86_64
-A=(--abi "arm64-v8a=$T/arm64-v8a" --abi "armeabi-v7a=$T/armeabi-v7a" --abi "x86_64=$T/x86_64")
+fake_abi arm64-v8a; fake_abi armeabi-v7a; fake_abi x86; fake_abi x86_64
+A=(--abi "arm64-v8a=$T/arm64-v8a" --abi "armeabi-v7a=$T/armeabi-v7a" --abi "x86=$T/x86" --abi "x86_64=$T/x86_64")
 
-echo "== 1. assembly of three ABIs"
+echo "== 1. assembly of four ABIs"
 python3 -I "$REPO/scripts/assemble_release.py" --out "$T/out1" --license l --no-audit "${A[@]}" > "$T/log1" 2>&1 && rc=0 || rc=$?
 DESC="assembly exit 0"; check test "$rc" = 0
-DESC="merged AAR has jni/ of the three ABIs"; check test "$(unzip -Z1 "$T/out1/libvlc-lgpl-3.7.0-l.aar" | grep -c '^jni/.*/libvlc\.so$')" = 3
+DESC="merged AAR has jni/ of the four ABIs (x86 distinct from x86_64)"; check test "$(unzip -Z1 "$T/out1/libvlc-lgpl-3.7.0-l.aar" | grep -c '^jni/\(arm64-v8a\|armeabi-v7a\|x86\|x86_64\)/libvlc\.so$')" = 4
 DESC="merged AAR has exactly one classes.jar"; check test "$(unzip -Z1 "$T/out1/libvlc-lgpl-3.7.0-l.aar" | grep -c '^classes\.jar$')" = 1
 DESC="SHA256SUMS and BUILD-INFO.txt written"; check test -s "$T/out1/SHA256SUMS" -a -s "$T/out1/BUILD-INFO.txt"
-DESC="BUILD-INFO.txt groups the three builds"; check test "$(grep -c '^BUILD OF ' "$T/out1/BUILD-INFO.txt")" = 3
-DESC="one audit per ABI"; check test "$(ls "$T/out1"/LICENSE-AUDIT-*-l.txt | wc -l)" -ge 4
+DESC="BUILD-INFO.txt groups the four builds"; check test "$(grep -c '^BUILD OF ' "$T/out1/BUILD-INFO.txt")" = 4
+DESC="one audit per ABI"; check test "$(ls "$T/out1"/LICENSE-AUDIT-*-l.txt | wc -l)" -ge 5
 
 echo "== 2. audit of the assembled AAR refuses a build that links libzvbi"
 python3 -I "$REPO/scripts/assemble_release.py" --out "$T/out2" --license l "${A[@]}" > "$T/log2" 2>&1 && rc=0 || rc=$?

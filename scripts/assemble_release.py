@@ -2,7 +2,7 @@
 """Assemble the per-ABI builds into ONE AAR and the files of one release.
 
   assemble_release.py --out DIR --license l [--version 3.7.0] [--no-audit]
-                      --abi arm64-v8a=DIR --abi armeabi-v7a=DIR --abi x86_64=DIR
+                      --abi arm64-v8a=DIR --abi armeabi-v7a=DIR --abi x86=DIR --abi x86_64=DIR
 
 Each DIR is the output of one `build.sh --abi ABI` run (libvlc-lgpl-<version>-<abi>-<license>.aar,
 BUILD-INFO.txt, SHA256SUMS.txt, LICENSE-AUDIT.txt, source/...). The script

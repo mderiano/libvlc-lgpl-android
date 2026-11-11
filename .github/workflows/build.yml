@@ -3,9 +3,9 @@ name: Build libvlc (LGPL)
 # Builds LibVLC for Android without any GPL component, in VideoLAN's own public
 # build image, then audits the result (check-no-gpl.sh). One ABI takes 1 to 2 hours.
 #
-#   abi = all (default): builds arm64-v8a, armeabi-v7a and x86_64 in parallel, audits each,
+#   abi = all (default): builds arm64-v8a, armeabi-v7a, x86 and x86_64 in parallel, audits each,
 #         then the "assemble" job merges them into ONE AAR (libvlc-lgpl-<version>-<license>.aar)
-#         and publishes ONE release, if and only if the three audits pass.
+#         and publishes ONE release, if and only if the four audits pass.
 #   abi = one ABI: a trial build with its own AAR and audit, no assembly, no release.
 #
 # See README.md.
@@ -14,9 +14,9 @@ on:
   workflow_dispatch:
     inputs:
       abi:
-        description: "Android ABI: all = the three ABIs, one AAR, one release; or a single ABI for a trial"
+        description: "Android ABI: all = the four ABIs, one AAR, one release; or a single ABI for a trial"
         type: choice
-        options: [all, arm64-v8a, armeabi-v7a, x86_64]
+        options: [all, arm64-v8a, armeabi-v7a, x86, x86_64]
         default: all
       license:
         description: "libvlcjni --license: l = LGPL 3 (GnuTLS, https works), a = LGPL 2.1 (no TLS)"
@@ -24,7 +24,7 @@ on:
         options: [l, a]
         default: l
       release:
-        description: "Publish a GitHub release when the three audits pass (abi = all only)"
+        description: "Publish a GitHub release when the four audits pass (abi = all only)"
         type: boolean
         default: true
       release_tag:
@@ -49,7 +49,7 @@ jobs:
           ABI_INPUT: ${{ inputs.abi }}
         run: |
           if [ "$ABI_INPUT" = all ]; then
-            echo 'abis=["arm64-v8a","armeabi-v7a","x86_64"]' >> "$GITHUB_OUTPUT"
+            echo 'abis=["arm64-v8a","armeabi-v7a","x86","x86_64"]' >> "$GITHUB_OUTPUT"
           else
             echo "abis=[\"$ABI_INPUT\"]" >> "$GITHUB_OUTPUT"
           fi
@@ -86,9 +86,10 @@ jobs:
         run: |
           # The two images libvlcjni's own .gitlab-ci.yml uses at the pinned commit:
           # 64-bit ABIs need NDK 27/28 (vlc-debian-android: NDK 28b, Gradle 8.13),
-          # armeabi-v7a needs NDK 21 (vlc-debian-android-3.0: NDK 21e, Gradle 8.13).
+          # armeabi-v7a and x86 need NDK 21 (vlc-debian-android-3.0: NDK 21e, Gradle 8.13;
+          # libvlcjni's buildsystem/gitlab/.gitlab-ci.yml builds both with that default image).
           # Both are public on registry.videolan.org (no authentication).
-          if [ "$ABI" = armeabi-v7a ]; then
+          if [ "$ABI" = armeabi-v7a ] || [ "$ABI" = x86 ]; then
             echo "image=registry.videolan.org/vlc-debian-android-3.0:20250626142950" >> "$GITHUB_OUTPUT"
           else
             echo "image=registry.videolan.org/vlc-debian-android:20250626142950" >> "$GITHUB_OUTPUT"
@@ -197,7 +198,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Download the three builds
+      - name: Download the four builds
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: "*-${{ inputs.license }}"
@@ -207,7 +208,7 @@ jobs:
         run: |
           set -euo pipefail
           IN="$RUNNER_TEMP/in"; ARGS=()
-          for abi in arm64-v8a armeabi-v7a x86_64; do
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
             d="$IN/build-$abi"; mkdir -p "$d"
             cp -r "$IN/libvlc-lgpl-$abi-$LICENSE_FLAG/." "$d/"
             mkdir -p "$d/source"
@@ -223,7 +224,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "### libvlc LGPL ${VERSION}, license ${LICENSE_FLAG}, one AAR for three ABIs"
+            echo "### libvlc LGPL ${VERSION}, license ${LICENSE_FLAG}, one AAR for four ABIs"
             if [ -f "$RUNNER_TEMP/release/SHA256SUMS" ]; then
               echo '```'; cat "$RUNNER_TEMP/release/SHA256SUMS"; echo '```'
             else
@@ -240,7 +241,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
-      - name: Publish the release (three audits passed)
+      - name: Publish the release (four audits passed)
         if: success() && inputs.release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -250,7 +251,7 @@ jobs:
           set -euo pipefail
           REL="$RUNNER_TEMP/release"
           aar_name="libvlc-lgpl-${VERSION}-${LICENSE_FLAG}.aar"
-          for abi in arm64-v8a armeabi-v7a x86_64; do   # never release without three passing audits
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do   # never release without four passing audits
             grep -q '^PASS' "$REL/LICENSE-AUDIT-$abi-$LICENSE_FLAG.txt"
           done
           grep -q '^PASS' "$REL/LICENSE-AUDIT-aar-$LICENSE_FLAG.txt"
@@ -266,7 +267,7 @@ jobs:
           fi
           aar_sha=$(sha256sum "$REL/$aar_name" | cut -d' ' -f1)
           cat > "$RUNNER_TEMP/notes.md" <<EOF
-          LibVLC ${VERSION} for Android without GPL components (libvlcjni 7cd0c151, VLC 3458be16): one AAR for arm64-v8a, armeabi-v7a and x86_64.
+          LibVLC ${VERSION} for Android without GPL components (libvlcjni 7cd0c151, VLC 3458be16): one AAR for arm64-v8a, armeabi-v7a, x86 and x86_64.
 
           | file | sha256 |
           |---|---|
@@ -274,7 +275,7 @@ jobs:
 
           Stable URL: https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/${aar_name}
 
-          Published only because the three per-ABI audits and the audit of the assembled AAR passed (LICENSE-AUDIT-*.txt). BUILD-INFO.txt groups the three builds; SHA256SUMS covers every file.
+          Published only because the four per-ABI audits and the audit of the assembled AAR passed (LICENSE-AUDIT-*.txt). BUILD-INFO.txt groups the four builds; SHA256SUMS covers every file.
           Corresponding source: vlc-*-patched-<abi>.tar.xz, libvlcjni-*-patched-<abi>.tar.xz and contrib-tarballs-<abi>.tar. Build run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           EOF
           gh release create "$tag" "$REL"/* --target "$GITHUB_SHA" \

@@ -49,6 +49,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 case "$ABI" in
   arm64-v8a) TUPLE=aarch64-linux-android ;;
   armeabi-v7a) TUPLE=arm-linux-androideabi ;;
+  x86) TUPLE=i686-linux-android ;;
   x86_64) TUPLE=x86_64-linux-android ;;
   *) echo "unsupported ABI $ABI" >&2; exit 2 ;;
 esac
