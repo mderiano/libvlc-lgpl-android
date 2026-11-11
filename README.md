@@ -15,8 +15,21 @@ This project is not affiliated with VideoLAN.
 
 ## What it produces
 
-For one ABI (`arm64-v8a` by default, `armeabi-v7a`, `x86_64`) and one license
-flag:
+**One release = one AAR for the three ABIs** (`arm64-v8a`, `armeabi-v7a`,
+`x86_64`), built in parallel, each audited, then merged by
+`scripts/assemble_release.py` (see "Building"). The release holds:
+
+| File | Content |
+|---|---|
+| `libvlc-lgpl-3.7.0-l.aar` | the library: one `classes.jar`, `jni/<abi>/{libvlc,libvlcjni,libc++_shared}.so` for each ABI |
+| `SHA256SUMS` | SHA-256 of every release file and of every `.so` inside the AAR |
+| `BUILD-INFO.txt` | the three builds grouped: pinned commits, patch hashes, exact options, NDK, per-ABI audit verdicts |
+| `LICENSE-AUDIT-<abi>-l.txt` | audit of each ABI (all checks, with the build tree) |
+| `LICENSE-AUDIT-aar-l.txt` | audit of the assembled AAR (`check-no-gpl.sh --aar-only`) |
+| `vlc-*-patched-<abi>.tar.xz`, `libvlcjni-*-patched-<abi>.tar.xz`, `contrib-tarballs-<abi>.tar`, `CONTRIB-SOURCES-<abi>.sha256` | corresponding source of each build |
+
+A single-ABI trial run (`abi` = one ABI in the workflow, or `build.sh --abi`)
+produces, for that ABI and one license flag:
 
 | File | Content |
 |---|---|
@@ -57,6 +70,14 @@ still contains GPL modules, which the patches of this repository remove:
   in the log and copied to `BUILD-INFO.txt`.
 * `patches/libvlcjni/0002`: `RendererDiscoverer.java` (GPL) and its native part are
   removed. `RendererItem` stays, so `MediaPlayer.setRenderer` still compiles.
+* `patches/libvlcjni/0003`: libzvbi (teletext/VBI decoding) is removed. libvlcjni's
+  script enables it explicitly (`--enable-zvbi` for the contrib bootstrap, line 301,
+  and for VLC's `configure`, line 373 of `buildsystem/compile-libvlc.sh` at the
+  pinned commit; 310 and 382 once patch 0001 is applied), and `--disable-gpl` does not remove it, yet libzvbi 0.2.35 has GPL-2
+  files (`src/pdc.c`, `src/packet-830.c`, `src/exp-vtx.c`). The patch makes both
+  `--disable-zvbi` and blacklists the `zvbi` module. VLC then builds its own LGPL
+  `telx` module instead (the one VLC uses when zvbi is absent). `v3.7.0-lgpl.1`
+  linked libzvbi: its audit did not look for it.
 * `patches/vlc/0001`: the yadif deinterlacing algorithm (`yadif.h`,
   `yadif_template.h`, taken from FFmpeg, GPL) is removed from the deinterlace
   module. The `yadif` and `yadif2x` modes remain selectable and use the `linear`
@@ -70,7 +91,10 @@ patches to VLC).
 DVD playback (libdvdread/libdvdnav; Blu-ray through libbluray stays), Lua
 playlist parsers and web-site extractors (YouTube, Vimeo, ..., `cue` sheets),
 the Lua interfaces, FFmpeg's postproc filters, x264 and other GPL encoders, the
-renderer discoverer API (Chromecast discovery; `RendererItem` and
+the `zvbi` module (libzvbi's VBI decoder, teletext page rendering, closed-caption and
+PDC/VPS decoding; the DVB teletext subtitles of broadcast streams are still decoded by
+VLC's own `telx` module, but the zvbi-based teletext rendering and the analog VBI /
+PDC services are gone), the renderer discoverer API (Chromecast discovery; `RendererItem` and
 `MediaPlayer.setRenderer` remain), yadif (replaced by linear interpolation), the
 filters `rotate` and `hqdn3d`, the channel mixers `mono`, `headphone` and
 `dolby surround`, RTP output, the RTSP VoD server, file/syslog loggers. Playback
@@ -97,8 +121,20 @@ ship it.
 ## Building
 
 On GitHub: **Actions, "Build libvlc (LGPL)", Run workflow**, choose `abi` and
-`license`. It takes 1 to 2 hours on `ubuntu-latest` (tarballs are cached) and
-ends with the audit; artifacts are kept for 90 days.
+`license`.
+
+* `abi = all` (default): a matrix builds `arm64-v8a`, `armeabi-v7a` (image
+  `vlc-debian-android-3.0`, NDK 21e) and `x86_64`, each with its own audit
+  (1 to 2 hours each, in parallel). Then the `assemble` job downloads the three
+  builds and runs `scripts/assemble_release.py`: it refuses an ABI whose audit is not
+  PASS or whose AAR does not match its `SHA256SUMS.txt`; it checks that the three
+  `classes.jar` are equivalent (same entry names, sizes and CRC-32; otherwise the
+  assembly fails); it writes the single AAR, `SHA256SUMS`, the grouped `BUILD-INFO.txt`,
+  the audits and the sources, audits the assembled AAR again, and, if all passed and
+  `release` is set, creates ONE release `v3.7.0-lgpl.N` (the next free number, or
+  `release_tag`; an existing release is never overwritten). If one ABI fails, no
+  assembly and no release happen; the other ABIs' artifacts stay for 90 days.
+* `abi = <one ABI>`: a trial. One AAR for that ABI, its audit, artifacts, no release.
 
 Locally on Linux with Docker (about 25 GB of disk, 16 GB of RAM recommended):
 
@@ -111,6 +147,8 @@ docker run --rm -e VLC_TARBALLS=/tarballs \
 ```
 
 `./build.sh --prepare-only` only clones and patches the sources.
+`scripts/tests/test_assemble.sh DIR` tests the assembly script and the zvbi check on a
+downloaded release (no build).
 Do not build VLC on a laptop outside such an image.
 
 ## The audit (`check-no-gpl.sh`)
@@ -136,6 +174,43 @@ Run at the end of `build.sh`; exit status 1 fails the build. It checks:
    their sources downloaded and compiled in the run (no prebuilt contrib archive),
    and FFmpeg's own configure summary saying "License: LGPL version 2.1 or later".
 7. a list of the linked contrib libraries and versions.
+8. **libzvbi** (A2): no `libzvbi` name and no `vbi_*` symbol in any `.so` (the check
+   that `v3.7.0-lgpl.1` lacked; run on that release's AAR it fails, see below).
+9. **third-party sources** (H): for every contrib package that was built (not only
+   the ones the GPL switches know), every source file whose header names the GNU
+   General Public License without "Lesser"/"Library", without a linking exception
+   and without a permissive alternative (BSD text) is looked up. It is refused when it
+   was compiled (an object file with the same stem next to it) and linked (an object
+   of that name is a member of a static library installed in the contrib prefix,
+   `ar t lib/*.a`). A GPL-only file that was not compiled, or compiled but in no
+   installed library (tools, tests), is only listed. Everything found is written to
+   `LICENSE-AUDIT.txt` (section H: `FAIL`, `EXCEPTION`, `info` lines). Without object
+   files (the corresponding-source tarballs, no build) every source counts as compiled
+   and linked: the check can only over-report.
+
+### Audit exceptions (`gpl-exceptions.tsv`)
+
+A GPL-only file that is compiled and linked is refused unless `gpl-exceptions.tsv`
+accepts it (package glob, path regex, written justification; the audit prints
+`EXCEPTION` and the justification). The list is short and every line is a program,
+test or tool that sits in a library's source tree but is never part of the library:
+
+* any package: `tests/`, `examples/`, `doc/`, `demos/`, `devel/` directories;
+* libpng `contrib/` (sample viewers); FLAC `src/{flac,metaflac,utils,test_*,share/grabbag,share/utf8}`
+  (command-line programs and their helper libraries; libFLAC is `src/libFLAC`);
+* GnuTLS `src/` (the `gnutls-cli`, `certtool` tools and their gnulib) and `extra/`
+  (libgnutls-openssl, GPL by design, built only with `--enable-openssl-compatibility`);
+* libtasn1 `src/` and `gl/` (tools and their gnulib); libiconv `src/`, `srclib/`, `tools/`,
+  `gnulib-local/` (the `iconv` program); libgcrypt `src/getrandom.c`, `src/gcryptrnd.c`
+  (random daemon, off); libnfs `utils/`; fribidi `bin/`; nettle `twofishdata.c` (generator);
+  libtheora `win32/`.
+
+The scan of the sources of the contribs of `v3.7.0-lgpl.1` (`contrib-tarballs-*.tar`, which
+has no object files, so everything counts as compiled) found exactly these categories,
+the GPL-only FFmpeg filters and libpostproc that `--disable-gpl` does not compile (they
+fail the check only when no build evidence exists), and libzvbi's `pdc.c`, `packet-830.c`,
+`exp-vtx.c`, which the 0003 patch removes. GMP, Nettle, GnuTLS, libgcrypt, FLAC
+etc. are LGPL or dual-licensed for what is archived in their libraries.
 
 ### Audit false positives found and fixed
 
@@ -156,6 +231,9 @@ without a GPL header, no GPL contrib):
 
 The same run also showed that the pattern "GPL version 2 or 3 or later" never ran
 (its `|` clashed with the pattern separator); it is fixed.
+
+A clean run is no proof of absence: the checks read symbol names, license strings and
+headers.
 
 Limits: it reads license headers and strings, not legal intent. A file without a
 license header is not refused. A module whose objects cannot be mapped to a
@@ -191,7 +269,7 @@ it are provided.
 
 ```kotlin
 dependencies {
-    implementation(files("libs/libvlc-lgpl-3.7.0-arm64-v8a-l.aar"))
+    implementation(files("libs/libvlc-lgpl-3.7.0-l.aar"))
     // what libvlc-all declares in its POM
     implementation("androidx.annotation:annotation:1.7.1")
     implementation("androidx.legacy:legacy-support-v4:1.0.0")
@@ -200,5 +278,6 @@ dependencies {
 
 It exposes the same `org.videolan.libvlc` API as `libvlc-all:3.7.0` minus
 `RendererDiscoverer`. Remove `org.videolan.android:libvlc-all` from the
-dependencies, otherwise both libraries collide. Use one ABI per AAR; build the
-ABIs you ship (an AAR holds the ABI it was built for).
+dependencies, otherwise both libraries collide. The release AAR holds the three
+ABIs; Gradle/AGP keeps the ones you ship (`ndk.abiFilters`). Do not combine it with
+the single-ABI AARs of a trial: they would collide on `classes.jar`.

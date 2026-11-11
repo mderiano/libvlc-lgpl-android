@@ -1,28 +1,34 @@
 name: Build libvlc (LGPL)
 
 # Builds LibVLC for Android without any GPL component, in VideoLAN's own public
-# build image, then audits the result (check-no-gpl.sh). The build takes 1 to 2
-# hours. See README.md.
+# build image, then audits the result (check-no-gpl.sh). One ABI takes 1 to 2 hours.
+#
+#   abi = all (default): builds arm64-v8a, armeabi-v7a and x86_64 in parallel, audits each,
+#         then the "assemble" job merges them into ONE AAR (libvlc-lgpl-<version>-<license>.aar)
+#         and publishes ONE release, if and only if the three audits pass.
+#   abi = one ABI: a trial build with its own AAR and audit, no assembly, no release.
+#
+# See README.md.
 
 on:
   workflow_dispatch:
     inputs:
       abi:
-        description: Android ABI
+        description: "Android ABI: all = the three ABIs, one AAR, one release; or a single ABI for a trial"
         type: choice
-        options: [arm64-v8a, armeabi-v7a, x86_64]
-        default: arm64-v8a
+        options: [all, arm64-v8a, armeabi-v7a, x86_64]
+        default: all
       license:
         description: "libvlcjni --license: l = LGPL 3 (GnuTLS, https works), a = LGPL 2.1 (no TLS)"
         type: choice
         options: [l, a]
         default: l
       release:
-        description: Publish a GitHub release when the audit passes
+        description: "Publish a GitHub release when the three audits pass (abi = all only)"
         type: boolean
         default: true
       release_tag:
-        description: "Existing release tag to add this ABI to (empty: create the next v3.7.0-lgpl.N)"
+        description: "Tag to create (empty: the next v3.7.0-lgpl.N). Never overwrites an existing release."
         type: string
         default: ""
 
@@ -32,14 +38,33 @@ permissions:
   contents: read
 
 jobs:
+  plan:
+    name: Plan the ABIs
+    runs-on: ubuntu-latest
+    outputs:
+      abis: ${{ steps.p.outputs.abis }}
+    steps:
+      - id: p
+        env:
+          ABI_INPUT: ${{ inputs.abi }}
+        run: |
+          if [ "$ABI_INPUT" = all ]; then
+            echo 'abis=["arm64-v8a","armeabi-v7a","x86_64"]' >> "$GITHUB_OUTPUT"
+          else
+            echo "abis=[\"$ABI_INPUT\"]" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
-    name: libvlc ${{ inputs.abi }} (license ${{ inputs.license }})
+    name: libvlc ${{ matrix.abi }} (license ${{ inputs.license }})
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 350
-    permissions:
-      contents: write   # only used by the release step, after a passing audit
+    strategy:
+      fail-fast: false   # keep the other ABIs running: a failed ABI still leaves its log and audit
+      matrix:
+        abi: ${{ fromJSON(needs.plan.outputs.abis) }}
     env:
-      ABI: ${{ inputs.abi }}
+      ABI: ${{ matrix.abi }}
       LICENSE_FLAG: ${{ inputs.license }}
     steps:
       - name: Checkout the recipe
@@ -74,7 +99,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/tarballs
-          key: vlc-contrib-tarballs-${{ steps.pins.outputs.vlc }}-${{ inputs.abi }}
+          key: vlc-contrib-tarballs-${{ steps.pins.outputs.vlc }}-${{ matrix.abi }}
           restore-keys: |
             vlc-contrib-tarballs-${{ steps.pins.outputs.vlc }}-
 
@@ -124,7 +149,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: libvlc-lgpl-${{ inputs.abi }}-${{ inputs.license }}
+          name: libvlc-lgpl-${{ matrix.abi }}-${{ inputs.license }}
           path: |
             ${{ runner.temp }}/out/*.aar
             ${{ runner.temp }}/out/BUILD-INFO.txt
@@ -139,7 +164,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: build-log-${{ inputs.abi }}-${{ inputs.license }}
+          name: build-log-${{ matrix.abi }}-${{ inputs.license }}
           path: ${{ runner.temp }}/out/build.log.gz
           if-no-files-found: ignore
           retention-days: 30
@@ -148,12 +173,72 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: corresponding-source-${{ inputs.abi }}-${{ inputs.license }}
+          name: corresponding-source-${{ matrix.abi }}-${{ inputs.license }}
           path: ${{ runner.temp }}/out/source
           if-no-files-found: ignore
           retention-days: 90
 
-      - name: Publish the release (audit passed)
+  assemble:
+    name: Assemble one AAR and release
+    needs: [plan, build]          # runs only when every ABI built and passed its audit
+    if: inputs.abi == 'all'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write             # release step only, after the assembly and its audit
+    env:
+      LICENSE_FLAG: ${{ inputs.license }}
+      VERSION: "3.7.0"
+    steps:
+      - name: Checkout the recipe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the three builds
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: "*-${{ inputs.license }}"
+          path: ${{ runner.temp }}/in
+
+      - name: Assemble (one classes.jar, jni/ of every ABI) and audit
+        run: |
+          set -euo pipefail
+          IN="$RUNNER_TEMP/in"; ARGS=()
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            d="$IN/build-$abi"; mkdir -p "$d"
+            cp -r "$IN/libvlc-lgpl-$abi-$LICENSE_FLAG/." "$d/"
+            mkdir -p "$d/source"
+            cp -r "$IN/corresponding-source-$abi-$LICENSE_FLAG/." "$d/source/"
+            ARGS+=(--abi "$abi=$d")
+          done
+          python3 scripts/assemble_release.py --out "$RUNNER_TEMP/release" --license "$LICENSE_FLAG" \
+            --version "$VERSION" "${ARGS[@]}"
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### libvlc LGPL ${VERSION}, license ${LICENSE_FLAG}, one AAR for three ABIs"
+            if [ -f "$RUNNER_TEMP/release/SHA256SUMS" ]; then
+              echo '```'; cat "$RUNNER_TEMP/release/SHA256SUMS"; echo '```'
+            else
+              echo "No assembly: at least one ABI failed its build or audit, or the classes.jar differ."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the assembled release files
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files-${{ inputs.license }}
+          path: ${{ runner.temp }}/release
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Publish the release (three audits passed)
         if: success() && inputs.release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -161,17 +246,12 @@ jobs:
           TAG_INPUT: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          VERSION=3.7.0
-          OUT="$RUNNER_TEMP/out"; STAGE="$RUNNER_TEMP/release"; sfx="${ABI}-${LICENSE_FLAG}"
-          grep -q '^PASS' "$OUT/LICENSE-AUDIT.txt"   # never release without a passing audit
-          mkdir -p "$STAGE"
-          cp "$OUT"/*.aar "$STAGE/"
-          cp "$OUT/BUILD-INFO.txt" "$STAGE/BUILD-INFO-$sfx.txt"
-          cp "$OUT/SHA256SUMS.txt" "$STAGE/SHA256SUMS-$sfx.txt"
-          cp "$OUT/LICENSE-AUDIT.txt" "$STAGE/LICENSE-AUDIT-$sfx.txt"
-          cp "$OUT"/source/vlc-*-patched.tar.xz "$OUT"/source/libvlcjni-*-patched.tar.xz "$STAGE/"
-          cp "$OUT/source/contrib-tarballs.tar" "$STAGE/contrib-tarballs-$sfx.tar"
-          cp "$OUT/source/CONTRIB-SOURCES.sha256" "$STAGE/CONTRIB-SOURCES-$sfx.sha256"
+          REL="$RUNNER_TEMP/release"
+          aar_name="libvlc-lgpl-${VERSION}-${LICENSE_FLAG}.aar"
+          for abi in arm64-v8a armeabi-v7a x86_64; do   # never release without three passing audits
+            grep -q '^PASS' "$REL/LICENSE-AUDIT-$abi-$LICENSE_FLAG.txt"
+          done
+          grep -q '^PASS' "$REL/LICENSE-AUDIT-aar-$LICENSE_FLAG.txt"
           if [ -n "$TAG_INPUT" ]; then
             tag="$TAG_INPUT"
           else
@@ -179,23 +259,22 @@ jobs:
               | sed -n "s/^v${VERSION}-lgpl\.\([0-9][0-9]*\)$/\1/p" | sort -n | tail -n 1)
             tag="v${VERSION}-lgpl.$(( ${last:-0} + 1 ))"
           fi
-          aar=$(ls "$STAGE"/*.aar | head -n 1); aar_name=$(basename "$aar"); aar_sha=$(sha256sum "$aar" | cut -d' ' -f1)
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists: refusing to overwrite it" >&2; exit 1
+          fi
+          aar_sha=$(sha256sum "$REL/$aar_name" | cut -d' ' -f1)
           cat > "$RUNNER_TEMP/notes.md" <<EOF
-          LibVLC ${VERSION} for Android without GPL components (libvlcjni ${LIBVLCJNI_SHORT:-7cd0c151}, VLC 3458be16).
+          LibVLC ${VERSION} for Android without GPL components (libvlcjni 7cd0c151, VLC 3458be16): one AAR for arm64-v8a, armeabi-v7a and x86_64.
 
-          | ABI | license flag | file | sha256 |
-          |---|---|---|---|
-          | ${ABI} | ${LICENSE_FLAG} | \`${aar_name}\` | \`${aar_sha}\` |
+          | file | sha256 |
+          |---|---|
+          | \`${aar_name}\` (license flag ${LICENSE_FLAG}) | \`${aar_sha}\` |
 
           Stable URL: https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/${aar_name}
 
-          The build passed check-no-gpl.sh (LICENSE-AUDIT-${sfx}.txt). BUILD-INFO-${sfx}.txt lists the pinned commits and options.
-          Corresponding source: the vlc and libvlcjni tarballs and contrib-tarballs-${sfx}.tar below. Build run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          Published only because the three per-ABI audits and the audit of the assembled AAR passed (LICENSE-AUDIT-*.txt). BUILD-INFO.txt groups the three builds; SHA256SUMS covers every file.
+          Corresponding source: vlc-*-patched-<abi>.tar.xz, libvlcjni-*-patched-<abi>.tar.xz and contrib-tarballs-<abi>.tar. Build run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           EOF
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$STAGE"/* --clobber
-          else
-            gh release create "$tag" "$STAGE"/* --target "$GITHUB_SHA" \
-              --title "libvlc ${VERSION} LGPL (${tag})" --notes-file "$RUNNER_TEMP/notes.md"
-          fi
+          gh release create "$tag" "$REL"/* --target "$GITHUB_SHA" \
+            --title "libvlc ${VERSION} LGPL (${tag})" --notes-file "$RUNNER_TEMP/notes.md"
           echo "release: $tag" | tee -a "$GITHUB_STEP_SUMMARY"
